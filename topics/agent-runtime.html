@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Agent Runtime 选型：Build vs Buy — OpenClaw 架构解析</title>
-  <meta name="description" content="从 Pi Agent Core 到 Claude SDK，五个项目的 Agent 执行引擎设计方案深度对比">
+  <meta name="description" content="从 Pi Agent Core 到 LangGraph，五个项目的 Agent 执行引擎设计方案深度对比">
   <link rel="stylesheet" href="../assets/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -339,7 +339,7 @@
     <div class="doc-hero-kicker">Architecture Deep Dive</div>
     <h1>Agent Runtime 选型<br>Build vs Buy 的五种答案</h1>
     <p class="doc-hero-subtitle">
-      你的 Agent 循环应该自己写，还是用现成的？从 Claude SDK 的黑盒运行时到 Rust 自建的企业级执行器，五个项目给出了五种截然不同的回答。
+      你的 Agent 循环应该自己写，还是用现成的？从 Claude SDK 的黑盒运行时到 LangGraph 的图状态机，再到 Rust 自建的企业级执行器，五个项目给出了五种截然不同的回答。
     </p>
     <div class="doc-hero-meta">
       <span class="doc-hero-meta-item">
@@ -367,7 +367,7 @@
       它决定了 Agent 如何调用 LLM、如何执行工具、如何管理上下文——以及你对这些行为有多少控制权。
     </p>
 
-    <p>我们研究了五个同源项目，它们面对同一个问题给出了不同的答案：</p>
+    <p>我们对比了五个项目，它们面对同一个问题给出了截然不同的答案：</p>
 
     <!-- Spectrum visualization -->
     <div class="spectrum">
@@ -377,8 +377,8 @@
           <span class="spectrum-segment-name">Claude SDK</span>
           <span class="spectrum-segment-lang">nanoclaw · TS</span>
         </div>
-        <div class="spectrum-segment" style="background: #3B82F6;">
-          <span class="spectrum-segment-name">nanobot</span>
+        <div class="spectrum-segment" style="background: #F59E0B;">
+          <span class="spectrum-segment-name">LangGraph</span>
           <span class="spectrum-segment-lang">Python</span>
         </div>
         <div class="spectrum-segment" style="background: #0D9488;">
@@ -775,34 +775,36 @@ async function agentLoop(config) {
       </div>
     </div>
 
-    <!-- nanobot -->
+    <!-- LangGraph -->
     <div class="project-card">
       <div class="project-card-header">
-        <div class="project-card-icon" style="background:#3B82F6;">Py</div>
+        <div class="project-card-icon" style="background:#F59E0B;">LG</div>
         <div class="project-card-info">
-          <h4>nanobot</h4>
-          <span>Python · 自建执行器 · ~500 LOC 核心循环</span>
+          <h4>LangGraph</h4>
+          <span>Python / TypeScript · 图状态机框架 · LangChain 生态</span>
         </div>
       </div>
       <div class="project-card-body">
         <div class="loop-block">
-          <span class="fn">AgentLoop.run</span>():<br>
-          &nbsp;&nbsp;<span class="fn">bus.consume_inbound</span>() → <span class="fn">_dispatch</span>(msg) <span class="cmt"># 全局锁</span><br>
-          &nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">_process_message</span>(msg):<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;session.get_or_create()<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">maybe_consolidate_by_tokens</span>()<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">_run_agent_loop</span>(messages, on_progress):<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">while</span> iter &lt; 40:<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">provider.chat_with_retry</span>(messages, tools, model)<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> tool_calls: execute each → append results<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">else</span>: <span class="kw">return</span> content
+          <span class="cmt">// 不是 while 循环，而是图遍历</span><br>
+          graph = <span class="fn">StateGraph</span>(AgentState)<br>
+          graph.<span class="fn">add_node</span>("agent", <span class="fn">call_llm</span>)<br>
+          graph.<span class="fn">add_node</span>("tools", <span class="fn">execute_tools</span>)<br>
+          graph.<span class="fn">add_edge</span>(START, "agent")<br>
+          graph.<span class="fn">add_conditional_edges</span>("agent", <span class="fn">should_continue</span>, {<br>
+          &nbsp;&nbsp;"tools": "tools",<br>
+          &nbsp;&nbsp;"end": END<br>
+          })<br>
+          graph.<span class="fn">add_edge</span>("tools", "agent") <span class="cmt">// 工具结果回到 LLM</span><br>
+          app = graph.<span class="fn">compile</span>(checkpointer=<span class="fn">PostgresSaver</span>())
         </div>
         <div class="feature-pills">
-          <span class="pill pill-highlight">LLM 驱动 Memory Consolidation</span>
-          <span class="pill pill-highlight">Progress Callback</span>
-          <span class="pill pill-highlight">SubagentManager</span>
-          <span class="pill pill-yes">50+ Provider (LiteLLM)</span>
-          <span class="pill pill-no">全局锁限制并发</span>
+          <span class="pill pill-highlight">图状态机 (DAG)</span>
+          <span class="pill pill-highlight">Checkpoint 时间旅行</span>
+          <span class="pill pill-highlight">Human-in-the-Loop</span>
+          <span class="pill pill-highlight">Supervisor 多 Agent</span>
+          <span class="pill pill-yes">100+ Provider (LangChain)</span>
+          <span class="pill pill-no">强绑 LangChain 生态</span>
         </div>
       </div>
     </div>
@@ -822,7 +824,7 @@ async function agentLoop(config) {
             <th>Claude SDK</th>
             <th>picoclaw</th>
             <th>IronClaw</th>
-            <th>nanobot</th>
+            <th>LangGraph</th>
           </tr>
         </thead>
         <tbody>
@@ -832,7 +834,15 @@ async function agentLoop(config) {
             <td>TypeScript</td>
             <td>Go</td>
             <td>Rust</td>
-            <td>Python</td>
+            <td>Python / TS</td>
+          </tr>
+          <tr>
+            <td>执行范式</td>
+            <td>while 循环</td>
+            <td>黑盒托管</td>
+            <td>while 循环</td>
+            <td>while 循环</td>
+            <td class="cell-yes">图状态机 (DAG)</td>
           </tr>
           <tr>
             <td>核心代码量</td>
@@ -840,7 +850,7 @@ async function agentLoop(config) {
             <td class="cell-no">0（黑盒）</td>
             <td class="cell-num">~1.8K</td>
             <td class="cell-num">~20K</td>
-            <td class="cell-num">~500</td>
+            <td>框架（声明式）</td>
           </tr>
           <tr>
             <td>LLM Provider 数</td>
@@ -848,7 +858,7 @@ async function agentLoop(config) {
             <td class="cell-num">1</td>
             <td class="cell-num">4-5</td>
             <td class="cell-num">8+</td>
-            <td class="cell-num">50+</td>
+            <td class="cell-num">100+</td>
           </tr>
           <tr>
             <td>流式输出</td>
@@ -856,7 +866,7 @@ async function agentLoop(config) {
             <td class="cell-yes">SDK 内建</td>
             <td class="cell-no">非流式</td>
             <td>SSE 事件</td>
-            <td>Progress CB</td>
+            <td class="cell-yes">Token + Node 级</td>
           </tr>
           <tr>
             <td>工具执行</td>
@@ -864,7 +874,7 @@ async function agentLoop(config) {
             <td>SDK 管理</td>
             <td class="cell-yes">并行</td>
             <td class="cell-yes">并行 3-phase</td>
-            <td>顺序</td>
+            <td class="cell-yes">并行（Superstep）</td>
           </tr>
           <tr>
             <td>运行中打断</td>
@@ -872,7 +882,7 @@ async function agentLoop(config) {
             <td>IPC 注入</td>
             <td class="cell-no">无</td>
             <td class="cell-yes">Signal</td>
-            <td class="cell-no">无</td>
+            <td class="cell-yes">interrupt_before/after</td>
           </tr>
           <tr>
             <td>工具审批流</td>
@@ -880,7 +890,7 @@ async function agentLoop(config) {
             <td class="cell-no">无</td>
             <td class="cell-no">无</td>
             <td class="cell-yes">完整</td>
-            <td class="cell-no">无</td>
+            <td class="cell-yes">Human-in-the-Loop</td>
           </tr>
           <tr>
             <td>Failover</td>
@@ -888,7 +898,7 @@ async function agentLoop(config) {
             <td class="cell-no">无</td>
             <td class="cell-yes">Chain + Cooldown</td>
             <td class="cell-yes">6 层装饰器链</td>
-            <td>3 次重试</td>
+            <td>依赖 LangChain</td>
           </tr>
           <tr>
             <td>安全沙箱</td>
@@ -899,20 +909,12 @@ async function agentLoop(config) {
             <td class="cell-no">无</td>
           </tr>
           <tr>
-            <td>MCP 支持</td>
-            <td class="cell-no">无</td>
-            <td class="cell-yes">自定义 Server</td>
-            <td class="cell-yes">发现 + TTL</td>
-            <td class="cell-yes">多传输</td>
-            <td class="cell-yes">懒加载</td>
-          </tr>
-          <tr>
             <td>Session 持久化</td>
             <td>JSONL 分支树</td>
             <td>SDK + SQLite</td>
             <td>JSONL</td>
             <td>PostgreSQL</td>
-            <td>JSONL</td>
+            <td class="cell-yes">Checkpointer（PG/Redis）</td>
           </tr>
           <tr>
             <td>多 Agent</td>
@@ -920,15 +922,15 @@ async function agentLoop(config) {
             <td class="cell-no">无</td>
             <td class="cell-yes">Registry + 路由</td>
             <td class="cell-yes">Scheduler + 子任务</td>
-            <td class="cell-yes">SubagentManager</td>
+            <td class="cell-yes">Supervisor + 子图</td>
           </tr>
           <tr>
-            <td>定时任务</td>
+            <td>时间旅行调试</td>
             <td class="cell-no">无</td>
-            <td class="cell-yes">TaskScheduler</td>
             <td class="cell-no">无</td>
-            <td class="cell-yes">RoutineEngine</td>
-            <td class="cell-yes">CronService</td>
+            <td class="cell-no">无</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">Checkpoint 回放</td>
           </tr>
         </tbody>
       </table>
@@ -1056,14 +1058,14 @@ async function agentLoop(config) {
         </ul>
       </div>
 
-      <div class="scenario-card" style="border-left: 3px solid #3B82F6; grid-column: 1 / -1;">
-        <h4>nanobot (Python)</h4>
-        <p><strong>最小可用 Agent 框架 · 500 行核心循环</strong></p>
+      <div class="scenario-card" style="border-left: 3px solid #F59E0B; grid-column: 1 / -1;">
+        <h4>LangGraph (Python / TypeScript)</h4>
+        <p><strong>图状态机 Agent 框架 · LangChain 生态</strong></p>
         <ul style="display:grid;grid-template-columns:1fr 1fr;gap:0 var(--space-8);">
-          <li>快速原型验证</li>
-          <li>Python 生态深度集成（数据科学、ML 管线）</li>
-          <li>最大 Provider 覆盖（LiteLLM 50+）</li>
-          <li>教学和学习 Agent 架构</li>
+          <li>需要可视化调试和 Checkpoint 时间旅行</li>
+          <li>Human-in-the-Loop 审批是核心需求</li>
+          <li>复杂多 Agent 协调（Supervisor / 层级团队）</li>
+          <li>已在 LangChain 生态中，希望声明式定义 Agent 流程</li>
         </ul>
       </div>
     </div>
@@ -1111,7 +1113,7 @@ async function agentLoop(config) {
     <div class="analogy">
       <div class="analogy-label">最终总结</div>
       <p>
-        <strong>Claude SDK</strong>（黑盒，零定制）→ <strong>nanobot</strong>（白盒，极简）→ <strong>Pi Agent Core</strong>（白盒，多 Provider + 可嵌入）→ <strong>picoclaw</strong>（白盒，极轻量 + 并行）→ <strong>IronClaw</strong>（白盒，安全 + 企业级）
+        <strong>Claude SDK</strong>（黑盒，零定制）→ <strong>LangGraph</strong>（图状态机，声明式）→ <strong>Pi Agent Core</strong>（白盒，多 Provider + 可嵌入）→ <strong>picoclaw</strong>（白盒，极轻量 + 并行）→ <strong>IronClaw</strong>（白盒，安全 + 企业级）
       </p>
       <p style="margin-top:var(--space-4);">
         没有"最好"的 Agent Runtime，只有<strong>最匹配你场景的</strong>。选型的核心问题永远是：<strong>你需要多少控制权？</strong>
