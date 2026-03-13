@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenClaw Architecture Deep Dive</title>
+  <meta name="description" content="OpenClaw 技术架构深度解析 — 多通道 AI 网关的核心设计与实现">
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    /* === Index page styles === */
+
+    /* Hero */
+    .index-hero {
+      text-align: center;
+      padding: var(--space-20) var(--space-8) var(--space-12);
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    .index-hero-kicker {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: var(--space-6);
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-3);
+    }
+
+    .index-hero-kicker::before,
+    .index-hero-kicker::after {
+      content: '';
+      display: inline-block;
+      width: 24px;
+      height: 2px;
+      background: var(--accent);
+      border-radius: 1px;
+    }
+
+    .index-hero h1 {
+      font-family: var(--font-display);
+      font-size: clamp(2.5rem, 6vw, var(--size-4xl));
+      font-weight: 500;
+      line-height: var(--leading-tight);
+      letter-spacing: -0.03em;
+      color: var(--ink);
+      margin-bottom: var(--space-6);
+    }
+
+    .index-hero h1 span { color: var(--accent); }
+
+    .index-hero-subtitle {
+      font-size: var(--size-lg);
+      line-height: var(--leading-snug);
+      color: var(--ink-secondary);
+      max-width: 56ch;
+      margin: 0 auto;
+    }
+
+    .index-hero-meta {
+      margin-top: var(--space-8);
+      display: flex;
+      justify-content: center;
+      gap: var(--space-8);
+      font-size: var(--size-sm);
+      color: var(--ink-tertiary);
+    }
+
+    .index-hero-meta-item {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+
+    .index-hero-meta-item svg {
+      width: 15px;
+      height: 15px;
+      opacity: 0.5;
+    }
+
+    /* ---- Architecture Diagram ---- */
+    .arch-section {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 0 var(--space-8) var(--space-12);
+    }
+
+    .arch-diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: var(--shadow-md);
+      padding: var(--space-8) var(--space-6);
+      overflow: hidden;
+    }
+
+    .arch-diagram-title {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-faint);
+      text-align: center;
+      margin-bottom: var(--space-8);
+    }
+
+    /* Vertical flow */
+    .arch-flow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+
+    .arch-layer-box {
+      width: 100%;
+      max-width: 680px;
+      border-radius: 12px;
+      padding: var(--space-4) var(--space-5);
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      position: relative;
+      cursor: default;
+      transition: transform var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) ease;
+    }
+
+    .arch-layer-box:hover {
+      transform: scale(1.02);
+      box-shadow: var(--shadow-md);
+    }
+
+    .arch-layer-num {
+      font-family: var(--font-display);
+      font-size: var(--size-lg);
+      font-weight: 300;
+      opacity: 0.4;
+      flex-shrink: 0;
+      width: 28px;
+      text-align: center;
+    }
+
+    .arch-layer-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .arch-layer-name {
+      font-family: var(--font-body);
+      font-size: var(--size-sm);
+      font-weight: 700;
+    }
+
+    .arch-layer-desc {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      opacity: 0.7;
+      margin-top: 2px;
+      line-height: 1.4;
+    }
+
+    .arch-layer-tags {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      opacity: 0.5;
+      margin-top: 3px;
+      line-height: 1.5;
+    }
+
+    /* Layer colors */
+    .arch-layer-channel  { background: rgba(37, 99, 235, 0.06); border: 1px solid rgba(37, 99, 235, 0.15); color: var(--accent-2); }
+    .arch-layer-gateway  { background: rgba(13, 148, 136, 0.06); border: 1px solid rgba(13, 148, 136, 0.15); color: var(--accent-3); }
+    .arch-layer-agent    { background: rgba(124, 58, 237, 0.06); border: 1px solid rgba(124, 58, 237, 0.15); color: var(--accent-4); }
+    .arch-layer-tool     { background: rgba(209, 77, 53, 0.06);  border: 1px solid rgba(209, 77, 53, 0.15);  color: var(--accent); }
+    .arch-layer-knowledge{ background: rgba(230, 126, 34, 0.06); border: 1px solid rgba(230, 126, 34, 0.15); color: #D97706; }
+
+    /* Flow arrows */
+    .arch-arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: var(--space-1) 0;
+      color: var(--ink-faint);
+    }
+
+    .arch-arrow-line {
+      width: 2px;
+      height: 12px;
+      background: var(--border-strong);
+      border-radius: 1px;
+    }
+
+    .arch-arrow svg {
+      width: 12px;
+      height: 12px;
+      opacity: 0.35;
+    }
+
+    /* Cross-cutting concerns */
+    .arch-crosscut-label {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--ink-faint);
+      text-align: center;
+      margin-top: var(--space-10);
+      margin-bottom: var(--space-4);
+    }
+
+    .arch-crosscut {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-3);
+      margin-top: 0;
+      max-width: 680px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    @media (max-width: 640px) {
+      .arch-crosscut { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .arch-crosscut-item {
+      font-family: var(--font-body);
+      font-size: var(--size-sm);
+      font-weight: 600;
+      padding: var(--space-3) var(--space-4);
+      border-radius: 10px;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all var(--duration-fast) var(--ease-out);
+      cursor: default;
+    }
+
+    .arch-crosscut-item:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .arch-cross-security {
+      background: rgba(220, 38, 38, 0.06);
+      border: 1px solid rgba(220, 38, 38, 0.15);
+      color: #B91C1C;
+    }
+    .arch-cross-security:hover { border-color: rgba(220, 38, 38, 0.30); }
+
+    .arch-cross-scheduling {
+      background: rgba(37, 99, 235, 0.06);
+      border: 1px solid rgba(37, 99, 235, 0.15);
+      color: var(--accent-2);
+    }
+    .arch-cross-scheduling:hover { border-color: rgba(37, 99, 235, 0.30); }
+
+    .arch-cross-multiagent {
+      background: rgba(124, 58, 237, 0.06);
+      border: 1px solid rgba(124, 58, 237, 0.15);
+      color: var(--accent-4);
+    }
+    .arch-cross-multiagent:hover { border-color: rgba(124, 58, 237, 0.30); }
+
+    .arch-cross-philosophy {
+      background: rgba(13, 148, 136, 0.06);
+      border: 1px solid rgba(13, 148, 136, 0.15);
+      color: var(--accent-3);
+    }
+    .arch-cross-philosophy:hover { border-color: rgba(13, 148, 136, 0.30); }
+
+    /* ---- Topic Sections ---- */
+    .topics-area {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: var(--space-8) var(--space-8) var(--space-24);
+    }
+
+    .layer-group {
+      margin-bottom: var(--space-12);
+    }
+
+    .layer-group-header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      margin-bottom: var(--space-6);
+      padding-bottom: var(--space-4);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .layer-group-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .layer-group-label {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-faint);
+    }
+
+    .layer-group-sublabel {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      color: var(--ink-faint);
+      opacity: 0.7;
+      margin-left: auto;
+    }
+
+    /* Dot colors */
+    .dot-channel  { background: var(--accent-2); }
+    .dot-gateway  { background: var(--accent-3); }
+    .dot-agent    { background: var(--accent-4); }
+    .dot-tool     { background: var(--accent); }
+    .dot-knowledge{ background: #D97706; }
+    .dot-cross    { background: var(--ink-tertiary); }
+
+    .topic-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: var(--space-4);
+    }
+
+    @media (min-width: 640px) {
+      .topic-grid-2col {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    /* Topic cards */
+    .topic-card {
+      display: block;
+      padding: var(--space-6) var(--space-6);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow-sm);
+      transition: all var(--duration-fast) var(--ease-out);
+      text-decoration: none;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .topic-card:hover {
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+      text-decoration: none;
+    }
+
+    .topic-card-number {
+      font-family: var(--font-display);
+      font-size: var(--size-3xl);
+      font-weight: 300;
+      color: var(--border);
+      position: absolute;
+      top: var(--space-3);
+      right: var(--space-5);
+      line-height: 1;
+      transition: color var(--duration-fast) ease;
+    }
+
+    .topic-card:hover .topic-card-number {
+      color: var(--border-strong);
+    }
+
+    .topic-card-tag {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      padding: 2px var(--space-2);
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: var(--space-3);
+    }
+
+    .tag-channel   { background: var(--accent-2-soft); color: var(--accent-2); }
+    .tag-gateway   { background: var(--accent-3-soft); color: var(--accent-3); }
+    .tag-agent     { background: var(--accent-4-soft); color: var(--accent-4); }
+    .tag-tool      { background: var(--accent-soft);   color: var(--accent); }
+    .tag-knowledge { background: rgba(217, 119, 6, 0.07); color: #D97706; }
+    .tag-cross     { background: var(--surface-dim);   color: var(--ink-tertiary); }
+
+    .topic-card h3 {
+      font-family: var(--font-display);
+      font-size: var(--size-lg);
+      font-weight: 500;
+      color: var(--ink);
+      margin-bottom: var(--space-2);
+      line-height: var(--leading-snug);
+      padding-right: var(--space-10);
+    }
+
+    .topic-card p {
+      font-size: var(--size-xs);
+      color: var(--ink-secondary);
+      line-height: var(--leading-normal);
+      max-width: 58ch;
+    }
+
+    .topic-card-arrow {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-size: var(--size-xs);
+      font-weight: 500;
+      color: var(--accent);
+      margin-top: var(--space-4);
+      transition: gap var(--duration-fast) var(--ease-out);
+    }
+
+    .topic-card:hover .topic-card-arrow { gap: var(--space-3); }
+
+    .topic-card-arrow svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .topic-card-disabled {
+      opacity: 0.50;
+      pointer-events: none;
+    }
+
+    .topic-card-disabled .topic-card-arrow { color: var(--ink-faint); }
+
+    /* Full-width card in 2-col grid */
+    .topic-card-full { grid-column: 1 / -1; }
+
+    /* Footer */
+    .index-footer {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: var(--space-8) var(--space-8) var(--space-16);
+      text-align: center;
+      color: var(--ink-faint);
+      font-size: var(--size-sm);
+      border-top: 1px solid var(--border);
+    }
+
+    @media (max-width: 768px) {
+      .index-hero {
+        padding: var(--space-12) var(--space-5) var(--space-10);
+      }
+      .arch-section, .topics-area {
+        padding-left: var(--space-5);
+        padding-right: var(--space-5);
+      }
+      .index-hero-meta {
+        flex-direction: column;
+        align-items: center;
+        gap: var(--space-2);
+      }
+      .arch-layer-tags { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<nav class="doc-topbar">
+  <span></span>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- ==================== HERO ==================== -->
+<header class="index-hero animate-in">
+  <div class="index-hero-kicker">Technical Presentation</div>
+  <h1>OpenClaw<br>Architecture <span>Deep Dive</span></h1>
+  <p class="index-hero-subtitle">
+    多通道 AI 网关的核心架构解析。沿一条消息的生命周期，逐层拆解 OpenClaw 的关键设计决策。
+  </p>
+  <div class="index-hero-meta">
+    <span class="index-hero-meta-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      2026-03-13
+    </span>
+    <span class="index-hero-meta-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+      技术架构系列
+    </span>
+  </div>
+</header>
+
+<!-- ==================== ARCHITECTURE DIAGRAM ==================== -->
+<section class="arch-section animate-in delay-1">
+  <div class="arch-diagram">
+    <div class="arch-diagram-title">Architecture Overview — 消息生命周期</div>
+
+    <div class="arch-flow">
+      <!-- Layer 1: Channels -->
+      <div class="arch-layer-box arch-layer-channel">
+        <div class="arch-layer-num">1</div>
+        <div class="arch-layer-content">
+          <div class="arch-layer-name">渠道接入层</div>
+          <div class="arch-layer-desc">20+ 消息渠道统一适配，插件扩展</div>
+          <div class="arch-layer-tags">Telegram · Discord · Slack · Signal · WhatsApp · Teams · 飞书 · Zalo · iMessage · Web ...</div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">
+        <div class="arch-arrow-line"></div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </div>
+
+      <!-- Layer 2: Gateway -->
+      <div class="arch-layer-box arch-layer-gateway">
+        <div class="arch-layer-num">2</div>
+        <div class="arch-layer-content">
+          <div class="arch-layer-name">Gateway 控制平面</div>
+          <div class="arch-layer-desc">单实例 WebSocket RPC，19 域管理，Session 路由，Lane Queue 并发控制</div>
+          <div class="arch-layer-tags">Session · Presence · Config · Cron · Lane Queue · 5-mode Dispatch</div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">
+        <div class="arch-arrow-line"></div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </div>
+
+      <!-- Layer 3: Agent Runtime -->
+      <div class="arch-layer-box arch-layer-agent">
+        <div class="arch-layer-num">3</div>
+        <div class="arch-layer-content">
+          <div class="arch-layer-name">Agent 运行时</div>
+          <div class="arch-layer-desc">嵌入式 Pi Agent Core，4 阶段推理循环，System Prompt 动态组装</div>
+          <div class="arch-layer-tags">Intake → Context → Model → Persist · Streaming · Compaction</div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">
+        <div class="arch-arrow-line"></div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </div>
+
+      <!-- Layer 4: Tool & Execution -->
+      <div class="arch-layer-box arch-layer-tool">
+        <div class="arch-layer-num">4</div>
+        <div class="arch-layer-content">
+          <div class="arch-layer-name">工具与执行层</div>
+          <div class="arch-layer-desc">7 层工具策略管道，Docker 沙箱隔离，Browser 自动化</div>
+          <div class="arch-layer-tags">Tool Policy · Plugin Hooks · Sandbox · CDP + Playwright</div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">
+        <div class="arch-arrow-line"></div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </div>
+
+      <!-- Layer 5: Knowledge -->
+      <div class="arch-layer-box arch-layer-knowledge">
+        <div class="arch-layer-num">5</div>
+        <div class="arch-layer-content">
+          <div class="arch-layer-name">知识层</div>
+          <div class="arch-layer-desc">Memory 持久记忆（混合搜索），Skills 技能系统（三层加载）</div>
+          <div class="arch-layer-tags">Vector + FTS5 · Embedding Chain · SKILL.md · Workspace Files</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cross-cutting -->
+    <div class="arch-crosscut-label">横切关注点</div>
+    <div class="arch-crosscut">
+      <span class="arch-crosscut-item arch-cross-security">安全与权限</span>
+      <span class="arch-crosscut-item arch-cross-scheduling">调度与多设备</span>
+      <span class="arch-crosscut-item arch-cross-multiagent">多 Agent 与 Canvas</span>
+      <span class="arch-crosscut-item arch-cross-philosophy">设计哲学</span>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== TOPIC CARDS ==================== -->
+<div class="topics-area">
+
+  <!-- ======== Layer 2: Gateway ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-gateway"></div>
+      <div class="layer-group-label">Layer 2 &mdash; Gateway 控制平面</div>
+      <div class="layer-group-sublabel">会话路由 · 并发控制 · 消息调度</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <a href="topics/gateway-control-plane.html" class="topic-card">
+        <span class="topic-card-number">01</span>
+        <span class="topic-card-tag tag-gateway">Control Plane</span>
+        <h3>Gateway 控制平面：单进程 WebSocket 的 19 域管理架构</h3>
+        <p>一个 WebSocket 端口统管 19 个管理域、104+ 个 RPC 方法、18 种广播事件。从会话管理到多节点编排的完整控制面。</p>
+        <span class="topic-card-arrow">
+          阅读详情
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </a>
+
+      <a href="topics/lane-queue.html" class="topic-card">
+        <span class="topic-card-number">02</span>
+        <span class="topic-card-tag tag-gateway">Concurrency</span>
+        <h3>Lane Queue：车道队列并发控制</h3>
+        <p>纯 TypeScript + Promises 的 lane-aware FIFO 队列。双层排队、Pump 自驱动、约 325 行代码解决并发安全。</p>
+        <span class="topic-card-arrow">
+          阅读详情
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </a>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">03</span>
+        <span class="topic-card-tag tag-gateway">Dispatch</span>
+        <h3>消息处理模式：5-mode 调度策略</h3>
+        <p>steer / followup / collect / steer-backlog / interrupt — 消息到达后如何决定处理方式。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======== Layer 3: Agent Runtime ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-agent"></div>
+      <div class="layer-group-label">Layer 3 &mdash; Agent 运行时</div>
+      <div class="layer-group-sublabel">推理循环 · 提示词组装 · 流式输出</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <a href="topics/agent-runtime.html" class="topic-card">
+        <span class="topic-card-number">04</span>
+        <span class="topic-card-tag tag-agent">Runtime</span>
+        <h3>Agent Runtime 选型：Build vs Buy 的五种答案</h3>
+        <p>从 Pi Agent Core 到 Claude SDK，五个项目给出五种 Agent 执行引擎方案。对比核心循环、工具执行、流式输出。</p>
+        <span class="topic-card-arrow">
+          阅读详情
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </a>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">05</span>
+        <span class="topic-card-tag tag-agent">Prompt</span>
+        <h3>System Prompt 组装与 Skill 注入</h3>
+        <p>11 个 section 的多模式动态组装、三层 Skill 加载策略、Bootstrap 上下文注入、Token 预算控制。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">06</span>
+        <span class="topic-card-tag tag-agent">Streaming</span>
+        <h3>Streaming 与 Compaction 架构</h3>
+        <p>增量推送的事件模型、Block Reply 分块策略、上下文压缩触发机制与 Memory Flush 保护。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======== Layer 1: Channels ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-channel"></div>
+      <div class="layer-group-label">Layer 1 &mdash; 渠道接入层</div>
+      <div class="layer-group-sublabel">统一适配 · 插件扩展</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">07</span>
+        <span class="topic-card-tag tag-channel">Channels</span>
+        <h3>渠道适配架构：20+ 平台的统一接入</h3>
+        <p>认证、解析、控制、格式化 4 层抽象。9 个内置渠道 + Plugin SDK 扩展机制。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======== Layer 4: Tool & Execution ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-tool"></div>
+      <div class="layer-group-label">Layer 4 &mdash; 工具与执行层</div>
+      <div class="layer-group-sublabel">工具策略 · 沙箱隔离 · 浏览器自动化</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">08</span>
+        <span class="topic-card-tag tag-tool">Tools</span>
+        <h3>Tool 系统与 Sandbox 沙箱</h3>
+        <p>7 层工具权限过滤管道、Plugin Hooks 生命周期、Docker 沙箱的 3 级隔离度（session/agent/shared）。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">09</span>
+        <span class="topic-card-tag tag-tool">Browser</span>
+        <h3>Browser 自动化</h3>
+        <p>CDP + Playwright 双层架构、3 种 Profile 模式、AI Snapshot 系统、Chrome Extension Relay。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======== Layer 5: Knowledge ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-knowledge"></div>
+      <div class="layer-group-label">Layer 5 &mdash; 知识层</div>
+      <div class="layer-group-sublabel">持久记忆 · 技能系统</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">10</span>
+        <span class="topic-card-tag tag-knowledge">Memory</span>
+        <h3>Memory 持久记忆系统</h3>
+        <p>Markdown + SQLite 混合存储、Vector(sqlite-vec) + Keyword(FTS5) 双路搜索、5 级 Embedding Provider 链。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======== Cross-cutting ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-cross"></div>
+      <div class="layer-group-label">横切关注点</div>
+      <div class="layer-group-sublabel">贯穿所有层的系统级能力</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">11</span>
+        <span class="topic-card-tag tag-cross">Security</span>
+        <h3>安全与权限体系</h3>
+        <p>DM Policy 4 种模式、Device Pairing、Exec Approvals 审批工作流、7 层 Tool Policy 管道。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">12</span>
+        <span class="topic-card-tag tag-cross">Scheduling</span>
+        <h3>调度与多设备</h3>
+        <p>Cron 定时任务、30 分钟 Heartbeat、Node 多节点管理、Device Pairing、APNs 推送唤醒。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">13</span>
+        <span class="topic-card-tag tag-cross">Multi-Agent</span>
+        <h3>多 Agent 与 Canvas / A2UI</h3>
+        <p>6 维 Agent 隔离（workspace / auth / session / tools / model / config）、Canvas WebSocket 推送 UI。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">14</span>
+        <span class="topic-card-tag tag-cross">Philosophy</span>
+        <h3>关键设计哲学</h3>
+        <p>No Magic · Trust Boundary as Session Key · Markdown as LLM-Native Interface · 行业趋同分析。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- Footer -->
+<footer class="index-footer">
+  <p>OpenClaw Architecture Deep Dive &middot; 2026</p>
+</footer>
+
+<script>
+  // Animate-in on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('.layer-group:not(.animate-in), .topic-card:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>

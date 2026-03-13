@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gateway 控制平面：单进程 WebSocket 的 19 域管理架构 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw Gateway 控制平面：19 个管理域、104+ RPC 方法、18 种广播事件，如何用一个 WebSocket 端口统管整个 AI 网关">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+  <style>
+    /* === Gateway page specific styles === */
+
+    /* Architecture layer grid */
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: var(--space-4);
+      margin: var(--space-8) 0;
+    }
+
+    @media (max-width: 640px) {
+      .arch-grid { grid-template-columns: 1fr; }
+    }
+
+    .arch-layer {
+      padding: var(--space-5) var(--space-5);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      transition: all var(--duration-fast) var(--ease-out);
+    }
+
+    .arch-layer:hover {
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .arch-layer-name {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: var(--space-3);
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+
+    .arch-layer-name::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .arch-layer-infra .arch-layer-name { color: var(--accent-2); }
+    .arch-layer-infra .arch-layer-name::before { background: var(--accent-2); }
+
+    .arch-layer-runtime .arch-layer-name { color: var(--accent-3); }
+    .arch-layer-runtime .arch-layer-name::before { background: var(--accent-3); }
+
+    .arch-layer-capability .arch-layer-name { color: var(--accent-4); }
+    .arch-layer-capability .arch-layer-name::before { background: var(--accent-4); }
+
+    .arch-layer-scheduling .arch-layer-name { color: var(--accent); }
+    .arch-layer-scheduling .arch-layer-name::before { background: var(--accent); }
+
+    .arch-layer-device .arch-layer-name { color: #E67E22; }
+    .arch-layer-device .arch-layer-name::before { background: #E67E22; }
+
+    .arch-layer-voice .arch-layer-name { color: #9B59B6; }
+    .arch-layer-voice .arch-layer-name::before { background: #9B59B6; }
+
+    .arch-layer-ops .arch-layer-name { color: #34495E; }
+    .arch-layer-ops .arch-layer-name::before { background: #34495E; }
+
+    .arch-layer-onboarding .arch-layer-name { color: #1ABC9C; }
+    .arch-layer-onboarding .arch-layer-name::before { background: #1ABC9C; }
+
+    .arch-layer-conn .arch-layer-name { color: var(--ink-tertiary); }
+    .arch-layer-conn .arch-layer-name::before { background: var(--ink-tertiary); }
+
+    .arch-layer-items {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      line-height: 1.7;
+      color: var(--ink-secondary);
+    }
+
+    /* Domain header badge */
+    .domain-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: var(--size-xs);
+      font-weight: 600;
+      padding: var(--space-1) var(--space-3);
+      border-radius: 6px;
+      margin-bottom: var(--space-4);
+    }
+
+    .domain-badge-blue { background: var(--accent-2-soft); color: var(--accent-2); }
+    .domain-badge-green { background: var(--accent-3-soft); color: var(--accent-3); }
+    .domain-badge-purple { background: var(--accent-4-soft); color: var(--accent-4); }
+    .domain-badge-red { background: var(--accent-soft); color: var(--accent); }
+    .domain-badge-orange { background: rgba(230, 126, 34, 0.07); color: #E67E22; }
+    .domain-badge-violet { background: rgba(155, 89, 182, 0.07); color: #9B59B6; }
+    .domain-badge-gray { background: var(--surface-dim); color: var(--ink-tertiary); }
+    .domain-badge-teal { background: rgba(26, 188, 156, 0.07); color: #1ABC9C; }
+
+    /* Stat highlights */
+    .stat-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-4);
+      margin: var(--space-8) 0;
+    }
+
+    .stat-card {
+      flex: 1;
+      min-width: 140px;
+      padding: var(--space-5);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      text-align: center;
+    }
+
+    .stat-card-num {
+      font-family: var(--font-display);
+      font-size: var(--size-3xl);
+      font-weight: 300;
+      color: var(--accent);
+      line-height: 1;
+      margin-bottom: var(--space-2);
+    }
+
+    .stat-card-label {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--ink-tertiary);
+    }
+
+    /* Broadcast event list */
+    .event-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: var(--space-3);
+      margin: var(--space-6) 0;
+    }
+
+    .event-item {
+      padding: var(--space-3) var(--space-4);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: var(--size-sm);
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-3);
+    }
+
+    .event-item-name {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--accent-2);
+      white-space: nowrap;
+    }
+
+    .event-item-desc {
+      font-size: var(--size-xs);
+      color: var(--ink-tertiary);
+      line-height: 1.4;
+    }
+
+    .event-item-scope {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 500;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      white-space: nowrap;
+    }
+
+    /* WS frame diagram */
+    .ws-frame {
+      display: flex;
+      gap: var(--space-6);
+      align-items: stretch;
+      margin: var(--space-4) 0;
+      flex-wrap: wrap;
+    }
+
+    .ws-frame-box {
+      flex: 1;
+      min-width: 240px;
+      padding: var(--space-4) var(--space-5);
+      border-radius: 10px;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      line-height: 1.8;
+    }
+
+    .ws-frame-request {
+      background: var(--accent-2-soft);
+      border: 1px solid rgba(37, 99, 235, 0.15);
+      color: var(--accent-2);
+    }
+
+    .ws-frame-response {
+      background: var(--accent-3-soft);
+      border: 1px solid rgba(13, 148, 136, 0.15);
+      color: var(--accent-3);
+    }
+
+    .ws-frame-broadcast {
+      background: var(--accent-4-soft);
+      border: 1px solid rgba(124, 58, 237, 0.15);
+      color: var(--accent-4);
+    }
+
+    .ws-frame-label {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: var(--space-2);
+      display: block;
+    }
+
+    /* Cross-cutting concern cards */
+    .concern-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: var(--space-4);
+      margin: var(--space-6) 0;
+    }
+
+    .concern-card {
+      padding: var(--space-5);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+
+    .concern-card h4 {
+      margin-top: 0;
+      margin-bottom: var(--space-2);
+      font-size: var(--size-sm);
+    }
+
+    .concern-card p {
+      font-size: var(--size-xs);
+      color: var(--ink-secondary);
+      line-height: 1.6;
+      margin-bottom: 0;
+    }
+
+    .concern-card code {
+      font-size: 0.75rem;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#overview">架构全景</a>
+  <a href="#protocol">通信协议</a>
+  <a href="#infra">基础设施层</a>
+  <a href="#runtime">运行时层</a>
+  <a href="#capability">能力层</a>
+  <a href="#scheduling">调度层</a>
+  <a href="#device-node">设备与节点层</a>
+  <a href="#voice">语音层</a>
+  <a href="#ops">运维层</a>
+  <a href="#onboarding">引导与连接层</a>
+  <a href="#broadcast">广播事件体系</a>
+  <a href="#cross-cutting">横切关注点</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Gateway 控制平面<br>单进程 WebSocket 的 19 域管理架构</h1>
+    <p class="doc-hero-subtitle">
+      一个运行在 127.0.0.1:18789 的 WebSocket RPC 服务，用 19 个管理域、104+ 个方法、18 种广播事件，统管 AI 网关的全部运行时状态。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/gateway/
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+  <!-- ==================== STATS ==================== -->
+  <div class="stat-row animate-in delay-1">
+    <div class="stat-card">
+      <div class="stat-card-num">19</div>
+      <div class="stat-card-label">管理域</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-num">104+</div>
+      <div class="stat-card-label">RPC 方法</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-num">18</div>
+      <div class="stat-card-label">广播事件</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-card-num">1</div>
+      <div class="stat-card-label">WebSocket 端口</div>
+    </div>
+  </div>
+
+
+  <!-- ==================== SECTION: OVERVIEW ==================== -->
+  <section id="overview" class="animate-in delay-2">
+    <h2>架构全景</h2>
+
+    <p>
+      OpenClaw Gateway 的控制平面是一个<strong>单实例 WebSocket RPC 服务</strong>，监听 <code>127.0.0.1:18789</code>。
+      所有的管理操作——从会话管理到设备配对、从定时任务到语音唤醒——都通过这一个端口完成。
+    </p>
+
+    <p>
+      整个控制平面可以划分为 <strong>9 个功能层</strong>，涵盖 19 个独立的管理域：
+    </p>
+
+    <div class="arch-grid">
+      <div class="arch-layer arch-layer-infra">
+        <div class="arch-layer-name">基础设施层</div>
+        <div class="arch-layer-items">Config / Sessions / Presence / Health / Secrets</div>
+      </div>
+      <div class="arch-layer arch-layer-runtime">
+        <div class="arch-layer-name">运行时层</div>
+        <div class="arch-layer-items">Agent / Chat / Exec Approval / Send</div>
+      </div>
+      <div class="arch-layer arch-layer-capability">
+        <div class="arch-layer-name">能力层</div>
+        <div class="arch-layer-items">Models / Tools / Skills / Channels / Browser</div>
+      </div>
+      <div class="arch-layer arch-layer-scheduling">
+        <div class="arch-layer-name">调度层</div>
+        <div class="arch-layer-items">Cron</div>
+      </div>
+      <div class="arch-layer arch-layer-device">
+        <div class="arch-layer-name">设备与节点层</div>
+        <div class="arch-layer-items">Device / Node / Push</div>
+      </div>
+      <div class="arch-layer arch-layer-voice">
+        <div class="arch-layer-name">语音层</div>
+        <div class="arch-layer-items">Talk / TTS / VoiceWake</div>
+      </div>
+      <div class="arch-layer arch-layer-ops">
+        <div class="arch-layer-name">运维层</div>
+        <div class="arch-layer-items">Usage / Logs / Update / Doctor</div>
+      </div>
+      <div class="arch-layer arch-layer-onboarding">
+        <div class="arch-layer-name">引导层</div>
+        <div class="arch-layer-items">Wizard / Web Login</div>
+      </div>
+      <div class="arch-layer arch-layer-conn">
+        <div class="arch-layer-name">连接层</div>
+        <div class="arch-layer-items">Connect / System</div>
+      </div>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        设计哲学
+      </div>
+      <p><strong>一个端口统管一切。</strong>Gateway 不是微服务架构——它是一个精心设计的单体，通过方法命名空间（如 <code>sessions.list</code>、<code>cron.add</code>、<code>device.pair.approve</code>）在一个 WebSocket 连接上提供所有管理能力。</p>
+      <p>这种设计消除了服务间通信的复杂性，同时通过 Role + Scope 鉴权体系保证安全隔离。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PROTOCOL ==================== -->
+  <section id="protocol">
+    <h2>通信协议</h2>
+
+    <p>
+      控制平面的所有通信都通过 <strong>WebSocket JSON 帧</strong>完成，遵循请求/响应模式，并支持服务端主动广播。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">WebSocket 帧格式</div>
+      <div class="ws-frame">
+        <div class="ws-frame-box ws-frame-request">
+          <span class="ws-frame-label">Request（客户端 → 服务端）</span>
+          { method: "sessions.list",<br>
+          &nbsp;&nbsp;params: { limit: 20 },<br>
+          &nbsp;&nbsp;id: 1 }
+        </div>
+        <div class="ws-frame-box ws-frame-response">
+          <span class="ws-frame-label">Response（服务端 → 客户端）</span>
+          { id: 1,<br>
+          &nbsp;&nbsp;result: [...] }<br>
+          <span style="opacity:0.6;">// 或 error: { code, message }</span>
+        </div>
+        <div class="ws-frame-box ws-frame-broadcast">
+          <span class="ws-frame-label">Broadcast（服务端 → 全部客户端）</span>
+          { type: "presence",<br>
+          &nbsp;&nbsp;payload: {...},<br>
+          &nbsp;&nbsp;stateVersion: 42 }
+        </div>
+      </div>
+    </div>
+
+    <p>
+      每个方法通过命名空间约定组织：<code>域.操作</code>（如 <code>config.patch</code>）或 <code>域.子域.操作</code>（如 <code>device.pair.approve</code>）。
+      服务端通过 <code>id</code> 匹配请求和响应，客户端可以并发发送多个请求。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: INFRA ==================== -->
+  <section id="infra">
+    <h2>基础设施层</h2>
+
+    <p>基础设施层提供整个 Gateway 运行所需的核心基座——配置存储、会话持久化、在线状态追踪、健康监控和密钥管理。</p>
+
+    <!-- Config -->
+    <h3>Config — 配置管理</h3>
+    <div class="domain-badge domain-badge-blue">config.* &middot; 6 个方法</div>
+
+    <p>
+      中心化配置存储，对应文件 <code>~/.openclaw/config.json5</code>。定义整个系统的行为：agents、channels、models、secrets、gateway 端口等。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th><th>关键特性</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>config.get</td><td>读取当前配置</td><td>返回 JSON + hash，敏感值自动 redact</td></tr>
+          <tr><td>config.set</td><td>替换整个配置</td><td>需 baseHash 防写入冲突</td></tr>
+          <tr><td>config.apply</td><td>写入配置并重启 Gateway</td><td>写 restart sentinel → SIGUSR1</td></tr>
+          <tr><td>config.patch</td><td>增量修改（JSON Patch RFC 6902）</td><td>需 baseHash，支持部分更新</td></tr>
+          <tr><td>config.schema</td><td>返回完整配置 schema</td><td>含 UI 渲染提示，插件可扩展</td></tr>
+          <tr><td>config.schema.lookup</td><td>按路径查询 schema 片段</td><td>如 <code>channels.discord.token</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        乐观并发控制
+      </div>
+      <p>所有写操作必须携带 <code>baseHash</code>——读取时获得的配置哈希值。如果写入时 hash 已变（说明有并发修改），操作被拒绝。这避免了分布式锁的复杂性，用 <strong>Compare-and-Swap</strong> 语义保证一致性。</p>
+    </div>
+
+    <!-- Sessions -->
+    <h3>Sessions — 会话管理</h3>
+    <div class="domain-badge domain-badge-blue">sessions.* &middot; 8 个方法</div>
+
+    <p>
+      持久化的对话线程。每个 session 对应一个 JSONL 转录文件，session key 格式为 <code>agentId@sessionId</code>。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>sessions.list</td><td>分页列出所有会话，支持按 agentId 过滤、排序</td></tr>
+          <tr><td>sessions.get</td><td>获取单个会话完整元数据</td></tr>
+          <tr><td>sessions.resolve</td><td>从部分标识符解析出完整 session key</td></tr>
+          <tr><td>sessions.preview</td><td>批量获取消息预览（读取转录文件尾部 16KB）</td></tr>
+          <tr><td>sessions.patch</td><td>更新元数据（model、thinkingLevel 等），需 baseHash</td></tr>
+          <tr><td>sessions.reset</td><td>重置对话历史，归档旧转录并创建新 sessionId</td></tr>
+          <tr><td>sessions.delete</td><td>删除会话及转录文件</td></tr>
+          <tr><td>sessions.compact</td><td>压缩转录文件（合并消息，保留最近 N 条）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      消息使用 <code>parentId</code> 链构成 <strong>DAG 结构</strong>（而非简单线性追加），支持分支对话。每个 session 携带丰富的元数据：model override、thinking level、subagent role（orchestrator / leaf）、exec 安全策略等。
+    </p>
+
+    <!-- Presence -->
+    <h3>Presence — 在线状态</h3>
+    <div class="domain-badge domain-badge-blue">system-presence &middot; 3 个方法</div>
+
+    <p>
+      实时追踪已连接的设备、节点和 Gateway 本身的状态。每个 presence 条目包含：host、ip、platform、deviceFamily、lastInputSeconds、mode（<code>gateway</code>/<code>node</code>）、roles、scopes 等。
+    </p>
+
+    <ul>
+      <li><strong>TTL 5 分钟</strong>：过期条目自动清除</li>
+      <li><strong>版本号递增</strong>：每次变更 <code>incrementPresenceVersion()</code>，客户端可对比 <code>stateVersion</code> 判断是否需要刷新</li>
+      <li><strong>主动广播</strong>：通过 <code>broadcastPresenceSnapshot()</code> 推送给所有连接的客户端</li>
+    </ul>
+
+    <!-- Health -->
+    <h3>Health — 健康监控</h3>
+    <div class="domain-badge domain-badge-blue">health / status &middot; 2 个方法</div>
+
+    <p>
+      <code>health</code> 返回完整健康快照：各 channel 状态、nodes、models、agents、plugins 的健康信息。缓存 15 秒，后台自动刷新。支持 <code>probe=true</code> 参数实时探测 channel 连通性。
+    </p>
+    <p>
+      <code>status</code> 返回摘要信息：host、version、内存用量、uptime、node 数量。admin scope 可见完整敏感字段。
+    </p>
+
+    <!-- Secrets -->
+    <h3>Secrets — 密钥管理</h3>
+    <div class="domain-badge domain-badge-blue">secrets.* &middot; 2 个方法</div>
+
+    <p>
+      <code>secrets.reload</code> 从存储重载密钥运行时快照；<code>secrets.resolve</code> 按命令名和目标 ID 解析密钥分配关系。支持多种密钥源：环境变量、文件、1Password、Vault。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: RUNTIME ==================== -->
+  <section id="runtime">
+    <h2>运行时层</h2>
+
+    <p>运行时层是 Gateway 最核心的部分——负责 Agent 执行、消息收发、命令审批。</p>
+
+    <!-- Agent -->
+    <h3>Agent — AI Agent 执行</h3>
+    <div class="domain-badge domain-badge-green">agent.* / agents.* &middot; 10 个方法</div>
+
+    <p>
+      <code>agent</code> 是核心执行入口：接收消息、解析附件、调度 Agent turn，返回 <code>runId</code>。
+      通过 dedupe map 实现<strong>幂等性</strong>（10 分钟 TTL），支持子 Agent 衍生（<code>spawnedBy</code>）和 <code>/new</code>、<code>/reset</code> 等特殊命令。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>agent</td><td>核心执行入口，接收消息并调度 Agent turn</td></tr>
+          <tr><td>agent.identity.get</td><td>获取 Agent 身份（name、avatar、emoji）</td></tr>
+          <tr><td>agent.wait</td><td>阻塞等待 Agent 任务完成（默认 30s 超时）</td></tr>
+          <tr><td>agents.list</td><td>列出所有已配置的 Agent</td></tr>
+          <tr><td>agents.create</td><td>创建新 Agent（含 workspace + IDENTITY.md）</td></tr>
+          <tr><td>agents.update</td><td>更新 Agent 属性</td></tr>
+          <tr><td>agents.delete</td><td>删除 Agent（可选删除 workspace 文件）</td></tr>
+          <tr><td>agents.files.list</td><td>列出工作区文件（IDENTITY/MEMORY/SOUL/TOOLS）</td></tr>
+          <tr><td>agents.files.get</td><td>读取工作区文件（含路径安全校验）</td></tr>
+          <tr><td>agents.files.set</td><td>写入工作区文件（<code>assertNoPathAliasEscape</code> 防穿越）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Chat -->
+    <h3>Chat — WebSocket 消息通道</h3>
+    <div class="domain-badge domain-badge-green">chat.* &middot; 4 个方法</div>
+
+    <p>
+      面向 Control UI（WebChat）的消息收发接口。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>chat.send</td><td>发送消息给 Agent，返回 runId + 流式结果</td></tr>
+          <tr><td>chat.history</td><td>获取消息历史（支持 parentId 分支 + maxBytes）</td></tr>
+          <tr><td>chat.abort</td><td>中止正在进行的 Agent 响应</td></tr>
+          <tr><td>chat.inject</td><td>注入系统消息（不触发 Agent 执行）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      使用 <code>ChatAbortControllers</code> Map 管理每个 <code>runId</code> 的 AbortSignal 生命周期。广播 <code>chat</code> 事件实现流式更新（delta + final）。
+    </p>
+
+    <!-- Exec Approval -->
+    <h3>Exec Approval — 执行审批</h3>
+    <div class="domain-badge domain-badge-green">exec.approval.* &middot; 5 个方法</div>
+
+    <p>
+      Agent 执行系统命令（如 bash）前的<strong>人工审批工作流</strong>。两层审批：Gateway 级 + Node 级。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>exec.approval.request</td><td>请求审批（含 command、commandArgv、安全上下文）</td></tr>
+          <tr><td>exec.approval.resolve</td><td>批准或拒绝（approve / deny）</td></tr>
+          <tr><td>exec.approvals.get</td><td>读取 Gateway 级审批策略配置</td></tr>
+          <tr><td>exec.approvals.set</td><td>写入审批策略（需 baseHash）</td></tr>
+          <tr><td>exec.approvals.node.*</td><td>读写 Node 级审批策略（远程转发到节点）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      广播 <code>exec.approval.requested</code> / <code>exec.approval.resolved</code> 事件，需要 <code>operator.approvals</code> scope。
+    </p>
+
+    <!-- Send -->
+    <h3>Send — 出站消息投递</h3>
+    <div class="domain-badge domain-badge-green">send &middot; 1 个方法</div>
+
+    <p>
+      向指定 channel（Telegram / Discord / Slack 等）发送出站消息。通过 inflight map 去重并发发送，验证 channel 可用性并执行投递策略。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: CAPABILITY ==================== -->
+  <section id="capability">
+    <h2>能力层</h2>
+
+    <p>能力层管理 Gateway 的"能做什么"——可用的模型、工具、技能和消息渠道。</p>
+
+    <!-- Models -->
+    <h3>Models — 模型目录</h3>
+    <div class="domain-badge domain-badge-purple">models.list &middot; 1 个方法</div>
+
+    <p>
+      返回可用 AI 模型列表（id、provider、capabilities），按 Agent 配置的 allowlist 过滤。运行时缓存。
+    </p>
+
+    <!-- Tools -->
+    <h3>Tools — 工具目录</h3>
+    <div class="domain-badge domain-badge-purple">tools.catalog &middot; 1 个方法</div>
+
+    <p>
+      按 <code>agentId</code> 返回工具分组目录。核心工具来自 <code>agents/tool-catalog.js</code>，插件工具从 workspace 动态加载。
+      支持四种 Tool Profile：<code>minimal</code> / <code>coding</code> / <code>messaging</code> / <code>full</code>。插件工具可按名称覆盖核心工具。
+    </p>
+
+    <!-- Skills -->
+    <h3>Skills — 技能管理</h3>
+    <div class="domain-badge domain-badge-purple">skills.* &middot; 4 个方法</div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>skills.status</td><td>查询已安装 / 可用技能</td></tr>
+          <tr><td>skills.bins</td><td>获取技能依赖的二进制程序列表</td></tr>
+          <tr><td>skills.install</td><td>从目录安装技能（支持 API key）</td></tr>
+          <tr><td>skills.update</td><td>更新已安装技能</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Channels -->
+    <h3>Channels — 渠道管理</h3>
+    <div class="domain-badge domain-badge-purple">channels.* &middot; 2 个方法</div>
+
+    <p>
+      <code>channels.status</code> 获取所有 channel 的配置和连接状态快照，支持 <code>probe=true</code> 实时探测，缓存 10 秒。
+      <code>channels.logout</code> 登出指定 channel 账号，停止 channel 并标记 loggedOut 状态。
+    </p>
+
+    <!-- Browser -->
+    <h3>Browser — 浏览器节点控制</h3>
+    <div class="domain-badge domain-badge-purple">browser.request &middot; 1 个方法</div>
+
+    <p>
+      代理 HTTP 请求到浏览器节点或本地浏览器控制服务，支持 GET/POST/DELETE。阻止 profile 增删操作，持久化代理文件并应用路径映射。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: SCHEDULING ==================== -->
+  <section id="scheduling">
+    <h2>调度层</h2>
+
+    <!-- Cron -->
+    <h3>Cron — 定时任务</h3>
+    <div class="domain-badge domain-badge-red">cron.* / wake &middot; 8 个方法</div>
+
+    <p>
+      可调度的定时作业，自动触发 Agent 对话或系统事件。持久化存储在 <code>~/.openclaw/cron/jobs</code>（每个 job 一个文件）+ <code>~/.openclaw/cron/runs</code>（JSONL 日志）。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>cron.list</td><td>分页列出定时任务，支持 query / enabled 过滤</td></tr>
+          <tr><td>cron.status</td><td>获取 cron 服务状态（运行中的 job、队列统计）</td></tr>
+          <tr><td>cron.add</td><td>创建定时任务</td></tr>
+          <tr><td>cron.update</td><td>修改任务</td></tr>
+          <tr><td>cron.remove</td><td>删除任务</td></tr>
+          <tr><td>cron.run</td><td>手动立即执行任务</td></tr>
+          <tr><td>cron.runs</td><td>查看执行历史日志</td></tr>
+          <tr><td>wake</td><td>全局唤醒，触发立即执行 cron</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong>三种调度模式：</strong></p>
+
+    <div class="compare-grid">
+      <div class="compare-card">
+        <h4 style="color: var(--accent);">at</h4>
+        <p>指定时间点一次性执行。如 <code>"2026-12-25T10:00:00Z"</code>，执行后可自动删除（<code>deleteAfterRun</code>）。</p>
+      </div>
+      <div class="compare-card">
+        <h4 style="color: var(--accent);">every</h4>
+        <p>按毫秒间隔循环执行。如每 30 分钟执行一次摘要。</p>
+      </div>
+    </div>
+    <div class="compare-grid">
+      <div class="compare-card" style="grid-column: 1 / -1;">
+        <h4 style="color: var(--accent-3);">cron</h4>
+        <p>标准 cron 表达式，如 <code>"0 9 * * *"</code>（每天早上 9 点）。支持时区配置。</p>
+      </div>
+    </div>
+
+    <p>
+      <strong>Payload 类型</strong>：<code>agentTurn</code>（发消息给 Agent）或 <code>systemEvent</code>（触发系统事件）。<br>
+      <strong>结果投递</strong>：<code>none</code> / <code>announce</code>（推送到 channel）/ <code>webhook</code>（HTTP 回调，含 SSRF 防护 + 10s 超时）。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: DEVICE & NODE ==================== -->
+  <section id="device-node">
+    <h2>设备与节点层</h2>
+
+    <p>这一层管理 Gateway 与外部实体（移动设备、远程计算节点）的认证和通信。</p>
+
+    <!-- Device Pairing -->
+    <h3>Device — 设备配对</h3>
+    <div class="domain-badge domain-badge-orange">device.* &middot; 6 个方法</div>
+
+    <p>
+      移动端 / 远程设备的注册与认证，用于 macOS / iOS / Android 原生 app 连接 Gateway。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">设备配对两阶段流程</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>Phase 1：设备发起请求</strong><br>
+          <span style="font-size:0.8rem;">deviceId, publicKey, displayName, platform, roles, scopes<br>创建 PendingRequest（TTL 5 分钟）</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">广播 device.pair.requested</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>Phase 2：操作者审批</strong><br>
+          <span style="font-size:0.8rem;">approve → 生成 DeviceAuthToken（含 role + scopes）<br>reject → 拒绝并通知设备</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">广播 device.pair.resolved</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>设备已配对</strong><br>
+          <span style="font-size:0.8rem;">支持 token 轮换（rotate）和吊销（revoke）<br>修复性重新配对（isRepair=true）</span>
+        </div>
+      </div>
+    </div>
+
+    <p>
+      存储：<code>~/.openclaw/pairing/devices/pending.json</code> + <code>paired.json</code>，async lock 保护并发访问。
+    </p>
+
+    <!-- Node -->
+    <h3>Node — 多节点管理</h3>
+    <div class="domain-badge domain-badge-orange">node.* &middot; 15+ 个方法</div>
+
+    <p>
+      管理远程计算节点的完整生命周期。这是 Gateway 作为"控制中枢"的核心体现。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>子域</th><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td style="color:var(--ink);" rowspan="5">配对</td><td>node.pair.request</td><td>节点请求配对（返回 pairingCode）</td></tr>
+          <tr><td>node.pair.list</td><td>列出待配对和已配对节点</td></tr>
+          <tr><td>node.pair.approve</td><td>批准节点配对</td></tr>
+          <tr><td>node.pair.reject</td><td>拒绝配对</td></tr>
+          <tr><td>node.pair.verify</td><td>验证节点 token 有效性</td></tr>
+          <tr><td style="color:var(--ink);" rowspan="3">操作</td><td>node.list</td><td>列出已连接节点（含 capabilities、platform）</td></tr>
+          <tr><td>node.describe</td><td>获取节点详细信息（commands、specs）</td></tr>
+          <tr><td>node.rename</td><td>设置节点显示名称</td></tr>
+          <tr><td style="color:var(--ink);" rowspan="3">远程调用</td><td>node.invoke</td><td>向节点发送命令（含 idempotencyKey + timeout）</td></tr>
+          <tr><td>node.invoke.result</td><td>获取 / 缓存节点调用结果</td></tr>
+          <tr><td>node.event</td><td>处理节点生命周期事件</td></tr>
+          <tr><td style="color:var(--ink);" rowspan="3">命令队列</td><td>node.pending.enqueue</td><td>入队命令（可选通过 APNs 唤醒节点）</td></tr>
+          <tr><td>node.pending.drain</td><td>节点拉取待处理命令</td></tr>
+          <tr><td>node.pending.ack</td><td>确认命令执行完成</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        APNs 唤醒机制
+      </div>
+      <p><code>node.pending.enqueue</code> 入队命令时，可选通过 Apple Push Notification Service（APNs）唤醒处于休眠状态的 iOS/macOS 节点。采用 <strong>2 阶段重试</strong>策略确保推送可靠性。</p>
+    </div>
+
+    <!-- Push -->
+    <h3>Push — 推送通知</h3>
+    <div class="domain-badge domain-badge-orange">push.test &middot; 1 个方法</div>
+
+    <p>发送测试 APNs 推送通知到指定节点，用于验证推送配置和连通性。</p>
+  </section>
+
+
+  <!-- ==================== SECTION: VOICE ==================== -->
+  <section id="voice">
+    <h2>语音层</h2>
+
+    <p>语音层提供端到端的语音交互能力——从唤醒词检测到语音模式切换，再到文本转语音输出。</p>
+
+    <!-- Talk -->
+    <h3>Talk — 语音模式</h3>
+    <div class="domain-badge domain-badge-violet">talk.* &middot; 2 个方法</div>
+
+    <p>
+      <code>talk.config</code> 获取语音配置（含 session mainKey、UI seamColor）。<code>talk.mode</code> 启用/禁用语音模式，广播 <code>talk.mode</code> 事件通知所有客户端。
+    </p>
+
+    <!-- TTS -->
+    <h3>TTS — 文本转语音</h3>
+    <div class="domain-badge domain-badge-violet">tts.* &middot; 6 个方法</div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>tts.status</td><td>获取 TTS 配置状态（enabled、provider、API key 可用性）</td></tr>
+          <tr><td>tts.providers</td><td>列出可用引擎（OpenAI / ElevenLabs / Edge TTS）</td></tr>
+          <tr><td>tts.enable</td><td>启用 TTS</td></tr>
+          <tr><td>tts.disable</td><td>禁用 TTS</td></tr>
+          <tr><td>tts.convert</td><td>文本 → 语音，返回 audioPath + outputFormat</td></tr>
+          <tr><td>tts.setProvider</td><td>切换活跃 TTS 引擎</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- VoiceWake -->
+    <h3>VoiceWake — 语音唤醒</h3>
+    <div class="domain-badge domain-badge-violet">voicewake.* &middot; 2 个方法</div>
+
+    <p>
+      <code>voicewake.get</code> 获取当前唤醒词列表；<code>voicewake.set</code> 设置唤醒词，广播 <code>voicewake.changed</code> 事件通知所有客户端更新本地唤醒词配置。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: OPS ==================== -->
+  <section id="ops">
+    <h2>运维层</h2>
+
+    <p>运维层提供 Gateway 的可观测性和自维护能力。</p>
+
+    <!-- Usage -->
+    <h3>Usage — 用量统计</h3>
+    <div class="domain-badge domain-badge-gray">usage.* &middot; 5 个方法</div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>usage.status</td><td>各 provider API 用量摘要</td></tr>
+          <tr><td>usage.cost</td><td>按 session / 全局的成本明细（model 级别），缓存 30s</td></tr>
+          <tr><td>sessions.usage</td><td>按会话的 token 用量</td></tr>
+          <tr><td>sessions.usage.timeseries</td><td>用量时间序列数据</td></tr>
+          <tr><td>sessions.usage.logs</td><td>用量明细日志</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Logs -->
+    <h3>Logs — 日志流</h3>
+    <div class="domain-badge domain-badge-gray">logs.tail &middot; 1 个方法</div>
+
+    <p>
+      流式读取日志尾部，采用 cursor 机制支持增量读取，能检测 rolling log 文件轮转。限制 1-5000 行、最大 1MB。
+    </p>
+
+    <!-- Update -->
+    <h3>Update — 自更新</h3>
+    <div class="domain-badge domain-badge-gray">update.run &middot; 1 个方法</div>
+
+    <p>
+      检查并安装更新。成功后写入 restart sentinel 文件，调度 SIGUSR1 信号让 Gateway 进程优雅重启加载新版本。
+    </p>
+
+    <!-- Doctor -->
+    <h3>Doctor — 诊断</h3>
+    <div class="domain-badge domain-badge-gray">doctor.memory.status &middot; 1 个方法</div>
+
+    <p>
+      探测 memory search 可用性——检测 embedding 模型是否就绪，用于诊断 memory RAG 功能的健康状态。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: ONBOARDING ==================== -->
+  <section id="onboarding">
+    <h2>引导与连接层</h2>
+
+    <!-- Wizard -->
+    <h3>Wizard — 初始配置向导</h3>
+    <div class="domain-badge domain-badge-teal">wizard.* &middot; 4 个方法</div>
+
+    <p>
+      引导用户完成首次配置的步骤式向导。<code>wizard.start</code> 启动向导（防止并发启动多个），<code>wizard.next</code> 推进步骤（提交 answer），<code>wizard.cancel</code> 取消，<code>wizard.status</code> 查询状态。
+    </p>
+
+    <!-- Web Login -->
+    <h3>Web Login — Web 渠道认证</h3>
+    <div class="domain-badge domain-badge-teal">web.login.* &middot; 2 个方法</div>
+
+    <p>
+      <code>web.login.start</code> 启动 Web channel QR 登录流程（先停止 channel，返回 qrCode + url）。<code>web.login.wait</code> 等待用户扫码完成认证。
+    </p>
+
+    <!-- Connect -->
+    <h3>Connect — WebSocket 握手</h3>
+    <div class="domain-badge domain-badge-gray">connect &middot; 1 个方法</div>
+
+    <p>
+      仅在 WebSocket 首帧有效的握手方法。握手期间使用 <code>connect.challenge</code> 事件进行认证挑战。后续调用返回 <code>INVALID_REQUEST</code>。
+    </p>
+
+    <!-- System -->
+    <h3>System — 心跳与事件</h3>
+    <div class="domain-badge domain-badge-gray">system-* &middot; 4 个方法</div>
+
+    <p>
+      <code>system-presence</code> 列出在线实体；<code>system-event</code> 入队系统事件并广播；<code>last-heartbeat</code> 获取最近心跳；<code>set-heartbeats</code> 启用/禁用心跳事件。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: BROADCAST ==================== -->
+  <section id="broadcast">
+    <h2>广播事件体系</h2>
+
+    <p>
+      除了请求/响应模式，Gateway 还通过 <strong>18 种广播事件</strong>主动向所有连接的客户端推送状态变更。部分事件受 scope 守卫保护。
+    </p>
+
+    <h3>公开事件（无 scope 要求）</h3>
+
+    <div class="event-grid">
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">agent</div>
+          <div class="event-item-desc">Agent 执行输出（thoughts、tool calls、results）</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">chat</div>
+          <div class="event-item-desc">WebChat 消息事件（delta 流式 + final）</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">presence</div>
+          <div class="event-item-desc">在线状态变更 + stateVersion</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">tick</div>
+          <div class="event-item-desc">周期性心跳（presence/health 同步）</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">health</div>
+          <div class="event-item-desc">健康状态更新</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">heartbeat</div>
+          <div class="event-item-desc">设备心跳</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">talk.mode</div>
+          <div class="event-item-desc">语音模式启用 / 禁用</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">cron</div>
+          <div class="event-item-desc">定时任务执行事件</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">voicewake.changed</div>
+          <div class="event-item-desc">唤醒词配置变更</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">shutdown</div>
+          <div class="event-item-desc">Gateway 关闭通知</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">update-available</div>
+          <div class="event-item-desc">新版本可用</div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">node.invoke.request</div>
+          <div class="event-item-desc">节点命令调用</div>
+        </div>
+      </div>
+    </div>
+
+    <h3>受保护事件（需要特定 scope）</h3>
+
+    <div class="event-grid">
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">device.pair.requested</div>
+          <div class="event-item-desc">设备配对请求 <span class="event-item-scope">operator.pairing</span></div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">device.pair.resolved</div>
+          <div class="event-item-desc">设备配对决定 <span class="event-item-scope">operator.pairing</span></div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">node.pair.requested</div>
+          <div class="event-item-desc">节点配对请求 <span class="event-item-scope">operator.pairing</span></div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">node.pair.resolved</div>
+          <div class="event-item-desc">节点配对决定 <span class="event-item-scope">operator.pairing</span></div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">exec.approval.requested</div>
+          <div class="event-item-desc">执行审批请求 <span class="event-item-scope">operator.approvals</span></div>
+        </div>
+      </div>
+      <div class="event-item">
+        <div>
+          <div class="event-item-name">exec.approval.resolved</div>
+          <div class="event-item-desc">执行审批决定 <span class="event-item-scope">operator.approvals</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        慢客户端保护
+      </div>
+      <p>广播时检测每个连接的 <code>bufferedAmount</code>。当缓冲区超过 <code>MAX_BUFFERED_BYTES</code> 阈值时，直接 <code>socket.close()</code> 断开慢客户端，防止一个慢客户端拖垮整个广播管道。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: CROSS-CUTTING ==================== -->
+  <section id="cross-cutting">
+    <h2>横切关注点</h2>
+
+    <p>以下机制贯穿所有管理域，是控制平面的"基础设施的基础设施"。</p>
+
+    <div class="concern-grid">
+      <div class="concern-card">
+        <h4>Role + Scope 鉴权</h4>
+        <p>三种角色：<code>operator</code> / <code>node</code> / <code>device</code>。权限通过 scopes 细分：<code>operator.admin</code>（super-scope）、<code>operator.approvals</code>、<code>operator.pairing</code>、<code>operator.talk.secrets</code> 等。</p>
+      </div>
+      <div class="concern-card">
+        <h4>幂等性</h4>
+        <p>Dedupe Map 存储 <code>runId → {ts, ok, payload, error}</code>，TTL 10 分钟。相同 <code>runId</code> 的重复请求直接返回缓存结果，不会重复执行 Agent turn。</p>
+      </div>
+      <div class="concern-card">
+        <h4>乐观并发</h4>
+        <p>Config 和 Session 的写操作需要 <code>baseHash</code>（Compare-and-Swap 语义）。避免分布式锁，设备/节点存储用 async lock 保护。</p>
+      </div>
+      <div class="concern-card">
+        <h4>限流</h4>
+        <p>Auth 尝试按 IP / role 限流。回环地址（127.0.0.1）豁免。<code>config.apply</code>、<code>update.run</code> 等写方法限 3 次 / 60 秒。</p>
+      </div>
+      <div class="concern-card">
+        <h4>参数校验</h4>
+        <p>AJV + TypeBox schema，每个方法入口自动校验。Protocol schema 定义在 <code>gateway/protocol/schema/</code> 目录。</p>
+      </div>
+      <div class="concern-card">
+        <h4>多级缓存</h4>
+        <p>Health 快照 15s、channels.status 10s、usage.cost 30s、model catalog 运行时缓存。后台自动刷新，避免热路径重复计算。</p>
+      </div>
+      <div class="concern-card">
+        <h4>优雅重启</h4>
+        <p>写入 restart sentinel 文件 → 发送 SIGUSR1 → Gateway 进程优雅重启。用于配置热加载和版本更新。</p>
+      </div>
+      <div class="concern-card">
+        <h4>慢客户端保护</h4>
+        <p>广播时检测 <code>bufferedAmount &gt; MAX_BUFFERED_BYTES</code>，超限直接 <code>socket.close()</code>。防止一个慢客户端阻塞整个事件管道。</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source">
+    <h2>源码索引</h2>
+
+    <p>以下是 Gateway 控制平面涉及的关键源文件，按职责分层列出：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>文件</th><th>职责</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>server.impl.ts</td><td>Gateway 启动入口、子系统初始化、方法绑定</td></tr>
+          <tr><td>server-methods.ts</td><td>聚合所有 29 个 handler 模块</td></tr>
+          <tr><td>server-methods-list.ts</td><td>方法注册中心（roles、scopes、rate limits）</td></tr>
+          <tr><td>server-broadcast.ts</td><td>广播事件路由 + scope 守卫</td></tr>
+          <tr><td>server-ws-runtime.ts</td><td>WebSocket 连接运行时</td></tr>
+          <tr><td>server/ws-connection.ts</td><td>连接状态管理</td></tr>
+          <tr><td>server-methods/*.ts</td><td>31 个 handler 文件，每个管理域一个</td></tr>
+          <tr><td>protocol/schema/*.ts</td><td>TypeBox 协议 schema 定义</td></tr>
+          <tr><td>server-cron.ts</td><td>Cron 调度引擎</td></tr>
+          <tr><td>server-node-subscriptions.ts</td><td>节点事件订阅机制</td></tr>
+          <tr><td>infra/system-presence.ts</td><td>Presence 追踪 + TTL</td></tr>
+          <tr><td>infra/device-pairing.ts</td><td>设备配对两阶段流程</td></tr>
+          <tr><td>session-utils.ts</td><td>Session 生命周期工具</td></tr>
+          <tr><td>config/config.ts</td><td>配置 schema + apply/patch</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">server.impl.ts — Gateway 启动流程概览</span>
+      </div>
+      <pre><code class="language-typescript">// Gateway 启动的 10 个关键步骤（简化）
+async function startGateway(options: GatewayOptions) {
+  // 1. 加载配置快照（含 legacy 迁移）
+  const config = await loadConfigSnapshot();
+
+  // 2. 创建 auth 限流器（loopback 豁免）
+  const rateLimiters = createAuthRateLimiters();
+
+  // 3. 初始化运行时状态
+  const state = {
+    healthCache: createRefreshableCache(15_000),
+    presenceVersion: 0,
+    chatAbortControllers: new Map(),
+    dedupeEntries: new Map(),       // 幂等性缓存
+    wizardSessions: new Map(),
+  };
+
+  // 4. 创建请求上下文
+  const context: GatewayRequestContext = {
+    cronService: new CronService(jobStorage),
+    execApprovalManager: new ExecApprovalManager(),
+    nodeRegistry: new NodeRegistry(),
+    channelManager: new ChannelManager(),
+    broadcast: scopeGuardedBroadcast,
+  };
+
+  // 5. 注册所有 handler（29 个模块）
+  registerHandlers(context);
+
+  // 6. 启动 sidecar 服务
+  await startChannelHealthMonitor();
+  await startConfigReloader();
+  await startBrowserControl();
+  await startMaintenanceTimers();
+
+  // 7. 监听 WebSocket 连接
+  wss.on('connection', handleConnection);
+
+  // 8. 绑定端口
+  server.listen(18789, '127.0.0.1');
+}</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="doc-footer">
+    <p>
+      OpenClaw Architecture Deep Dive &middot;
+      <a href="../index.html">返回总览</a>
+    </p>
+  </footer>
+
+</main>
+
+<script>
+  // Syntax highlighting
+  hljs.highlightAll();
+
+  // Scroll progress bar
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // TOC active state tracking
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) {
+        currentId = section.id;
+      }
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  // Animate-in on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>

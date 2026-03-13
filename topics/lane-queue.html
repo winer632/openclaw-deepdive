@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lane Queue（车道队列）：并发控制核心 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的 Lane Queue 车道队列并发控制机制：双层排队、Promise 实现、为何不需要 Redis">
+  <link rel="stylesheet" href="../assets/style.css">
+  <!-- Syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents (fixed side panel on wide screens) -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#why">为什么需要并发控制</a>
+  <a href="#lanes">车道类型一览</a>
+  <a href="#two-level">双层排队机制</a>
+  <a href="#pump">Pump 自驱动引擎</a>
+  <a href="#promise">Promise 机制解析</a>
+  <a href="#vs-redis">为什么不需要 Redis</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Lane Queue<br>车道队列：并发控制核心</h1>
+    <p class="doc-hero-subtitle">
+      纯 TypeScript + Promises 实现的 lane-aware FIFO 队列。无 Redis，无后台线程，约 325 行代码解决多通道 AI 网关的并发安全问题。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/process/command-queue.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: WHY ==================== -->
+  <section id="why" class="animate-in delay-1">
+    <h2>为什么需要并发控制</h2>
+
+    <p>
+      OpenClaw 是一个<strong>多通道 AI 网关</strong>，同时连接 Telegram、Discord、Slack、Signal 等多个消息平台。
+      在生产环境中，Gateway 进程随时可能面临这样的场景：
+    </p>
+
+    <ul>
+      <li>用户 Alice 在 Telegram 发了一条消息，Agent 正在生成回复</li>
+      <li>用户 Bob 在 Discord 同时发了一条消息</li>
+      <li>一个定时任务（cron）触发了每日摘要</li>
+      <li>Alice 等不及，又追加发了第二条消息</li>
+    </ul>
+
+    <p>
+      如果这些任务不加控制地并发执行，就会出现严重问题——尤其是 <strong>Alice 的两条消息被两个 Agent 同时处理</strong>，
+      两个 Agent 会同时读写 Alice 的对话历史，导致上下文冲突、回复错乱。
+    </p>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        核心问题
+      </div>
+      <p><strong>并发冲突</strong>：同一会话的多条消息如果被并行处理，Agent 会同时读写对话上下文，导致数据不一致和回复错乱。</p>
+      <p>Lane Queue 的设计目标就是：<strong>"Only one agent run touches a given session at a time"</strong>（同一时间只有一个 Agent 能操作某个会话）。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: LANE TYPES ==================== -->
+  <section id="lanes" class="animate-in delay-2">
+    <h2>车道类型一览</h2>
+
+    <p>
+      Lane Queue 采用<strong>高速公路收费站</strong>的设计思路：多条车道并行，每条车道有独立的通行规则和限速。
+      任务按类型被分配到不同车道，车道之间互不干扰。
+    </p>
+
+    <!-- Visual lane diagram -->
+    <div class="diagram">
+      <div class="diagram-title">Lane Queue 车道可视化</div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-2);">session:alice</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-session">1</div>
+        </div>
+        <span class="lane-info">严格串行 — 同一时间只有一个任务</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-2);">session:bob</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-session">1</div>
+        </div>
+        <span class="lane-info">与 Alice 完全独立</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-3);">main</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-main">1</div>
+          <div class="lane-slot lane-slot-main">2</div>
+          <div class="lane-slot lane-slot-main">3</div>
+          <div class="lane-slot lane-slot-main">4</div>
+        </div>
+        <span class="lane-info">系统全局吞吐量上限</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-4);">subagent</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-subagent">1</div>
+          <div class="lane-slot lane-slot-subagent">2</div>
+          <div class="lane-slot lane-slot-subagent">3</div>
+          <div class="lane-slot lane-slot-subagent">4</div>
+          <div class="lane-slot lane-slot-subagent">5</div>
+          <div class="lane-slot lane-slot-subagent">6</div>
+          <div class="lane-slot lane-slot-subagent">7</div>
+          <div class="lane-slot lane-slot-subagent">8</div>
+        </div>
+        <span class="lane-info">子 Agent 并行执行</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent);">cron</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-cron">1</div>
+        </div>
+        <span class="lane-info">定时任务串行执行</span>
+      </div>
+    </div>
+
+    <!-- Lane types table -->
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>车道</th>
+            <th>默认并发数</th>
+            <th>用途</th>
+            <th>设计意图</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>session:&lt;key&gt;</td>
+            <td><span class="num">1</span></td>
+            <td>每个用户会话一条专属车道</td>
+            <td>严格串行，保证同一会话不会被多个 Agent 同时处理</td>
+          </tr>
+          <tr>
+            <td>main</td>
+            <td><span class="num">4</span></td>
+            <td>全局吞吐量控制</td>
+            <td>限制系统同时运行的 Agent 总数，防止资源过载</td>
+          </tr>
+          <tr>
+            <td>subagent</td>
+            <td><span class="num">8</span></td>
+            <td>子 Agent 生成</td>
+            <td>Agent 运行过程中可以派生子 Agent，允许更高并行度</td>
+          </tr>
+          <tr>
+            <td>cron</td>
+            <td><span class="num">1</span></td>
+            <td>定时任务</td>
+            <td>定时摘要、报告等任务，默认串行避免堆积</td>
+          </tr>
+          <tr>
+            <td>nested</td>
+            <td>独立</td>
+            <td>嵌套工具调用</td>
+            <td>Agent 调用工具时的递归调用，独立于其他车道</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      车道在首次使用时<strong>按需创建</strong>。每个新车道的默认并发数为 1（见 <code>getLaneState</code> 函数），
+      Gateway 启动时通过 <code>applyGatewayLaneConcurrency</code> 配置各车道的并发上限。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/gateway/server-lanes.ts</span>
+      </div>
+      <pre><code class="language-typescript">export function applyGatewayLaneConcurrency(cfg: ReturnType&lt;typeof loadConfig&gt;) {
+  setCommandLaneConcurrency(CommandLane.Cron, cfg.cron?.maxConcurrentRuns ?? 1);
+  setCommandLaneConcurrency(CommandLane.Main, resolveAgentMaxConcurrent(cfg));    // 默认 4
+  setCommandLaneConcurrency(CommandLane.Subagent, resolveSubagentMaxConcurrent(cfg)); // 默认 8
+}</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: TWO-LEVEL ==================== -->
+  <section id="two-level">
+    <h2>双层排队机制</h2>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        核心洞察
+      </div>
+      <p><code>session:&lt;key&gt;</code> 和 <code>main</code> 看起来都在处理聊天任务，但<strong>它们并不重复</strong>——而是分别解决不同层面的问题，形成双层排队。</p>
+    </div>
+
+    <p>
+      一个 Agent 任务执行前，会经过<strong>两层队列</strong>的筛选。我们来看源码中的实际实现：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-runner/run.ts:274-275</span>
+      </div>
+      <pre><code class="language-typescript">return enqueueSession(() =&gt;        // 第 1 层：进入 session:alice 排队
+    enqueueGlobal(async () =&gt; {    // 第 2 层：进入 main 排队
+      // ... 真正执行 Agent 任务
+    })
+);</code></pre>
+    </div>
+
+    <h3>双层排队的执行流程</h3>
+
+    <!-- Flow diagram -->
+    <div class="diagram">
+      <div class="diagram-title">任务如何穿越两层队列</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>第 1 层：session:alice</strong>（并发 1）<br>
+          <span style="font-size:0.8rem;">保证 Alice 的消息严格按顺序，一条处理完再处理下一条</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">获得 session 许可后</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>第 2 层：main</strong>（并发 4）<br>
+          <span style="font-size:0.8rem;">控制全系统同时运行的 Agent 总数，防止过载</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">获得全局许可后</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>执行 Agent 任务</strong><br>
+          <span style="font-size:0.8rem;">调用 AI 模型、生成回复、写入对话历史</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>为什么两层都不可缺少？</h3>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-bad">
+        <h4 style="color: var(--accent);">如果只有 session，没有 main</h4>
+        <p>
+          100 个用户同时发消息 → 100 个 session 车道各放行 1 个任务 → <strong>100 个 Agent 同时运行</strong>
+          → CPU、内存、API 调用配额全部过载，系统崩溃。
+        </p>
+      </div>
+      <div class="compare-card compare-card-bad">
+        <h4 style="color: var(--accent);">如果只有 main，没有 session</h4>
+        <p>
+          Alice 连发 3 条消息 → 3 条可能同时占据 main 的 3 个槽位 → <strong>3 个 Agent 同时读写 Alice 的对话历史</strong>
+          → 上下文冲突，回复混乱。
+        </p>
+      </div>
+    </div>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good" style="grid-column: 1 / -1;">
+        <h4 style="color: var(--accent-3);">两层配合：session 管顺序，main 管总量</h4>
+        <p>
+          <code>session:alice</code> 保证 Alice 的 3 条消息排队串行 → 每次只有 1 条进入 <code>main</code> →
+          <code>main</code> 保证全系统最多 4 个 Agent 同时运行。<strong>既安全，又高效。</strong>
+        </p>
+      </div>
+    </div>
+
+    <h3>具体场景走查</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">时间线示例</div>
+      <div class="doc-table-wrap" style="border:none;box-shadow:none;margin:0;">
+        <table>
+          <thead>
+            <tr>
+              <th style="min-width:100px;">事件</th>
+              <th>session 车道</th>
+              <th>main 车道</th>
+              <th>结果</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="font-family:var(--font-body);color:var(--ink);">Alice 发 "你好"</td>
+              <td>session:alice → <span class="num">执行中</span></td>
+              <td>占用 1/4 槽位</td>
+              <td style="color:var(--accent-3);font-weight:600;">立即执行</td>
+            </tr>
+            <tr>
+              <td style="font-family:var(--font-body);color:var(--ink);">Alice 发 "天气？"</td>
+              <td>session:alice → <span class="num">排队等待</span></td>
+              <td>—</td>
+              <td style="color:var(--accent);font-weight:600;">等待（"你好"还在处理）</td>
+            </tr>
+            <tr>
+              <td style="font-family:var(--font-body);color:var(--ink);">Bob 发 "Hi"</td>
+              <td>session:bob → <span class="num">执行中</span></td>
+              <td>占用 2/4 槽位</td>
+              <td style="color:var(--accent-3);font-weight:600;">立即执行（与 Alice 独立）</td>
+            </tr>
+            <tr>
+              <td style="font-family:var(--font-body);color:var(--ink);">"你好" 处理完毕</td>
+              <td>session:alice → pump</td>
+              <td>"天气" 占用槽位</td>
+              <td style="color:var(--accent-3);font-weight:600;">"天气" 开始执行</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PUMP ==================== -->
+  <section id="pump">
+    <h2>Pump 自驱动引擎</h2>
+
+    <p>
+      队列的核心调度逻辑是一个<strong>自驱动的泵（pump）</strong>——不需要外部定时器或轮询线程，
+      每个任务完成后会自动检查并启动下一个任务。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/process/command-queue.ts — drainLane 核心逻辑</span>
+      </div>
+      <pre><code class="language-typescript">const pump = () =&gt; {
+  try {
+    // 只要：正在执行的任务数 &lt; 最大并发数 且 队列中还有等待的任务
+    while (state.activeTaskIds.size &lt; state.maxConcurrent && state.queue.length &gt; 0) {
+      const entry = state.queue.shift();  // 取出队头任务
+      const taskId = nextTaskId++;
+      state.activeTaskIds.add(taskId);
+
+      void (async () =&gt; {
+        try {
+          const result = await entry.task();  // 执行任务
+          completeTask(state, taskId, taskGeneration);
+          pump();                              // 完成后，再次泵送下一个！
+          entry.resolve(result);               // 通知调用方
+        } catch (err) {
+          completeTask(state, taskId, taskGeneration);
+          pump();                              // 即使失败，也继续泵送
+          entry.reject(err);
+        }
+      })();
+    }
+  } finally {
+    state.draining = false;
+  }
+};</code></pre>
+    </div>
+
+    <p>流程可以简化为三步循环：</p>
+
+    <ol>
+      <li><strong>任务入队</strong> → 调用 <code>enqueueCommandInLane()</code>，任务被放入对应车道的队列尾部</li>
+      <li><strong>触发 drain</strong> → 调用 <code>drainLane()</code>，启动 pump</li>
+      <li><strong>pump 循环</strong> → 取出队头、执行、完成后再次 pump → 自动驱动下一个任务</li>
+    </ol>
+
+    <div class="analogy">
+      <div class="analogy-label">生活类比</div>
+      <p>
+        想象一条传送带：工人取走一个包裹、处理完毕后，传送带自动向前滚动，下一个包裹自动到位。
+        不需要有人站在旁边喊"下一个"——完成本身就是启动下一个的信号。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PROMISE ==================== -->
+  <section id="promise">
+    <h2>Promise 机制解析</h2>
+
+    <p>
+      整个队列系统是用 JavaScript 的 <strong>Promise</strong> 构建的。如果你不熟悉 Promise，
+      可以把它理解为——<strong>餐厅的叫号器</strong>。
+    </p>
+
+    <div class="analogy">
+      <div class="analogy-label">叫号器类比</div>
+      <p>你去餐厅点餐：</p>
+      <p>1. 你点了一份牛排 → <strong>发起异步操作</strong></p>
+      <p>2. 服务员给你一个叫号器 → 你拿到一个 <strong>Promise</strong></p>
+      <p>3. 你可以去做别的事（看手机、聊天） → <strong>程序继续执行其他代码，不用干等</strong></p>
+      <p>4. 叫号器响了 → Promise 变为 <strong>Fulfilled</strong>（完成）</p>
+      <p>5. 你去取餐 → <strong>获得结果</strong></p>
+    </div>
+
+    <h3>Promise 的三种状态</h3>
+
+    <div class="diagram">
+      <div class="state-diagram">
+        <div class="state-node state-pending">Pending<br><span style="font-size:0.75rem;font-family:var(--font-body);">等待中</span></div>
+        <div class="state-arrow">→</div>
+        <div style="display:flex;flex-direction:column;gap:var(--space-3);align-items:flex-start;">
+          <div class="state-node state-fulfilled">Fulfilled<br><span style="font-size:0.75rem;font-family:var(--font-body);">成功，拿到结果</span></div>
+          <div class="state-node state-rejected">Rejected<br><span style="font-size:0.75rem;font-family:var(--font-body);">失败，拿到原因</span></div>
+        </div>
+      </div>
+    </div>
+
+    <h3>Promise 在队列中的角色</h3>
+
+    <p>看 <code>enqueueCommandInLane</code> 的核心代码：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/process/command-queue.ts:175-186</span>
+      </div>
+      <pre><code class="language-typescript">return new Promise&lt;T&gt;((resolve, reject) =&gt; {
+  // 把任务放进队列，同时把 resolve/reject 也存起来
+  state.queue.push({
+    task: () =&gt; task(),
+    resolve,      // ← "叫号器的按钮"——任务完成时按这个通知调用方
+    reject,       // ← 任务失败时按这个
+    enqueuedAt: Date.now(),
+    warnAfterMs,
+  });
+  drainLane(cleaned);   // 尝试启动队列
+});</code></pre>
+    </div>
+
+    <p>整个流程是：</p>
+
+    <ol>
+      <li>调用方调用 <code>enqueueCommandInLane()</code> → 拿到一个 Promise（叫号器）</li>
+      <li>任务被放进队列等待，调用方可以 <code>await</code> 这个 Promise</li>
+      <li>轮到它执行时，<code>pump()</code> 取出任务并运行</li>
+      <li>任务跑完 → 调用 <code>resolve(result)</code> → 调用方的 Promise 收到结果，被唤醒</li>
+    </ol>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        关键优势
+      </div>
+      <p>Promise 充当<strong>通知机制</strong>——调用方不用轮询"我的任务完了没？"，只需要 <code>await</code>，任务完成时会自动被通知。</p>
+      <p>这是一种<strong>推送模型（push）</strong>而非<strong>拉取模型（poll）</strong>，零 CPU 消耗等待。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: VS REDIS ==================== -->
+  <section id="vs-redis">
+    <h2>为什么不需要 Redis</h2>
+
+    <p>
+      传统的消息队列系统通常依赖 Redis、RabbitMQ 等外部中间件。
+      OpenClaw 选择了纯进程内实现，这不是偷懒——而是<strong>架构决策的精确匹配</strong>。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>能力</th>
+            <th>Redis 方案</th>
+            <th>Promise 队列方案</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">任务排队</td>
+            <td>List（LPUSH / RPOP）</td>
+            <td>Array（push / shift）</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">完成通知</td>
+            <td>Pub/Sub 或轮询</td>
+            <td>Promise resolve（零延迟）</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">并发控制</td>
+            <td>分布式锁 / Lua 脚本</td>
+            <td><code>activeTaskIds.size &lt; maxConcurrent</code></td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">跨进程共享</td>
+            <td style="color:var(--accent-3);font-weight:600;">支持</td>
+            <td style="color:var(--accent);font-weight:600;">不支持</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">跨机器共享</td>
+            <td style="color:var(--accent-3);font-weight:600;">支持</td>
+            <td style="color:var(--accent);font-weight:600;">不支持</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">运维成本</td>
+            <td>需要部署、监控、维护 Redis 实例</td>
+            <td style="color:var(--accent-3);font-weight:600;">零——代码即基础设施</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">延迟</td>
+            <td>网络往返（~1ms）</td>
+            <td style="color:var(--accent-3);font-weight:600;">微秒级（进程内调用）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        架构决策
+      </div>
+      <p>
+        <strong>OpenClaw Gateway 是单进程架构</strong>——所有消息通道的请求都在同一个 Node.js 进程中处理。
+        进程内的 <code>Map</code> + <code>Array</code> + <code>Promise</code> 已经完全满足需求。
+      </p>
+      <p>
+        引入 Redis 不会带来任何好处，反而增加部署复杂度、网络延迟和运维负担。
+        <strong>不是 Promise 比 Redis 更强，而是在单进程场景下，简单方案就是最优方案。</strong>
+      </p>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        如果你是<strong>连锁餐厅</strong>（多进程、多机器），叫号系统确实需要一个中央服务器（Redis）来跨门店协调。
+        但如果你是<strong>单体小餐厅</strong>（单进程），一个本地叫号器就完全够用——花钱装中央系统反而是浪费。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source">
+    <h2>源码索引</h2>
+
+    <p>以下是 Lane Queue 系统涉及的关键源文件，按职责分层列出：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>src/process/lanes.ts</td>
+            <td>车道类型定义</td>
+            <td><code>CommandLane</code> 枚举（Main, Cron, Subagent, Nested）</td>
+          </tr>
+          <tr>
+            <td>src/process/command-queue.ts</td>
+            <td>队列核心实现（~325行）</td>
+            <td><code>enqueueCommandInLane</code>, <code>drainLane</code>, <code>setCommandLaneConcurrency</code></td>
+          </tr>
+          <tr>
+            <td>src/gateway/server-lanes.ts</td>
+            <td>Gateway 启动时配置各车道并发数</td>
+            <td><code>applyGatewayLaneConcurrency</code></td>
+          </tr>
+          <tr>
+            <td>src/config/agent-limits.ts</td>
+            <td>并发数默认值与解析</td>
+            <td><code>resolveAgentMaxConcurrent</code>, <code>resolveSubagentMaxConcurrent</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/agents/pi-embedded-runner/run.ts</td>
+            <td>Agent 运行入口（双层排队在此实现）</td>
+            <td><code>runEmbeddedPiAgent</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/agents/pi-embedded-runner/lanes.ts</td>
+            <td>Session / Global 车道解析</td>
+            <td><code>resolveSessionLane</code>, <code>resolveGlobalLane</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/plugin-sdk/keyed-async-queue.ts</td>
+            <td>轻量级 per-key 串行队列（控制面板用）</td>
+            <td><code>KeyedAsyncQueue</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>核心数据结构</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/process/command-queue.ts — 类型定义</span>
+      </div>
+      <pre><code class="language-typescript">type LaneState = {
+  lane: string;               // 车道名称，如 "main" 或 "session:alice"
+  queue: QueueEntry[];         // 等待队列（FIFO）
+  activeTaskIds: Set&lt;number&gt;;  // 当前正在执行的任务 ID 集合
+  maxConcurrent: number;       // 该车道的最大并发数
+  draining: boolean;           // 是否正在执行 pump
+  generation: number;          // 代际计数器，用于重启后忽略过期任务
+};</code></pre>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/process/lanes.ts — 车道枚举</span>
+      </div>
+      <pre><code class="language-typescript">export const enum CommandLane {
+  Main = "main",
+  Cron = "cron",
+  Subagent = "subagent",
+  Nested = "nested",
+}</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="doc-footer">
+    <p>
+      OpenClaw Architecture Deep Dive &middot;
+      <a href="../index.html">返回总览</a>
+    </p>
+  </footer>
+
+</main>
+
+<script>
+  // Syntax highlighting
+  hljs.highlightAll();
+
+  // Scroll progress bar
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // TOC active state tracking
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) {
+        currentId = section.id;
+      }
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  // Animate-in on scroll (intersection observer)
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>

@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Runtime 选型：Build vs Buy — OpenClaw 架构解析</title>
+  <meta name="description" content="从 Pi Agent Core 到 Claude SDK，五个项目的 Agent 执行引擎设计方案深度对比">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+  <style>
+    /* === Agent Runtime page specific styles === */
+
+    /* Spectrum bar */
+    .spectrum {
+      margin: var(--space-10) 0;
+      padding: var(--space-8);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: var(--shadow-md);
+    }
+
+    .spectrum-title {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-tertiary);
+      margin-bottom: var(--space-6);
+      text-align: center;
+    }
+
+    .spectrum-bar {
+      display: flex;
+      align-items: stretch;
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: var(--space-6);
+      min-height: 60px;
+    }
+
+    .spectrum-segment {
+      flex: 1;
+      padding: var(--space-3) var(--space-4);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: var(--space-1);
+      transition: flex var(--duration-fast) var(--ease-out);
+      cursor: default;
+      position: relative;
+    }
+
+    .spectrum-segment:hover {
+      flex: 1.3;
+    }
+
+    .spectrum-segment-name {
+      font-family: var(--font-mono);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: white;
+      white-space: nowrap;
+    }
+
+    .spectrum-segment-lang {
+      font-size: 0.625rem;
+      color: rgba(255,255,255,0.7);
+      font-family: var(--font-body);
+    }
+
+    .spectrum-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: var(--size-xs);
+      color: var(--ink-tertiary);
+      font-family: var(--font-body);
+    }
+
+    /* Project cards */
+    .project-card {
+      margin: var(--space-8) 0;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .project-card-header {
+      padding: var(--space-5) var(--space-6);
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .project-card-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: var(--size-sm);
+      font-weight: 700;
+      color: white;
+      flex-shrink: 0;
+    }
+
+    .project-card-info h4 {
+      font-family: var(--font-display);
+      font-size: var(--size-lg);
+      font-weight: 500;
+      color: var(--ink);
+      margin: 0 0 var(--space-1);
+    }
+
+    .project-card-info span {
+      font-size: var(--size-xs);
+      color: var(--ink-tertiary);
+    }
+
+    .project-card-body {
+      padding: var(--space-6);
+    }
+
+    .project-card-body p {
+      font-size: var(--size-sm);
+      margin-bottom: var(--space-4);
+    }
+
+    /* Feature pills */
+    .feature-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin: var(--space-4) 0;
+    }
+
+    .pill {
+      font-family: var(--font-mono);
+      font-size: 0.6875rem;
+      font-weight: 500;
+      padding: var(--space-1) var(--space-3);
+      border-radius: 20px;
+      border: 1px solid;
+      white-space: nowrap;
+    }
+
+    .pill-yes {
+      background: rgba(13, 148, 136, 0.06);
+      border-color: rgba(13, 148, 136, 0.2);
+      color: var(--accent-3);
+    }
+
+    .pill-no {
+      background: rgba(26, 26, 26, 0.03);
+      border-color: var(--border);
+      color: var(--ink-faint);
+    }
+
+    .pill-highlight {
+      background: rgba(37, 99, 235, 0.06);
+      border-color: rgba(37, 99, 235, 0.2);
+      color: var(--accent-2);
+    }
+
+    /* Comparison table — wider first column */
+    .matrix-table td:first-child {
+      font-family: var(--font-body) !important;
+      color: var(--ink) !important;
+      font-weight: 500;
+      white-space: normal;
+      min-width: 130px;
+    }
+
+    .matrix-table td {
+      font-size: 0.8125rem;
+    }
+
+    .matrix-table th {
+      text-align: center;
+    }
+
+    .matrix-table th:first-child {
+      text-align: left;
+    }
+
+    .matrix-table td:not(:first-child) {
+      text-align: center;
+      font-family: var(--font-body);
+      color: var(--ink-secondary);
+      white-space: normal;
+    }
+
+    .cell-yes {
+      color: var(--accent-3) !important;
+      font-weight: 600;
+    }
+
+    .cell-no {
+      color: var(--ink-faint) !important;
+    }
+
+    .cell-num {
+      font-family: var(--font-mono) !important;
+      font-weight: 600;
+      color: var(--ink) !important;
+    }
+
+    /* Loop pseudocode blocks */
+    .loop-block {
+      margin: var(--space-6) 0;
+      padding: var(--space-5) var(--space-6);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-family: var(--font-mono);
+      font-size: 0.8125rem;
+      line-height: 1.8;
+      color: var(--ink-secondary);
+      overflow-x: auto;
+    }
+
+    .loop-block strong {
+      color: var(--ink);
+    }
+
+    .loop-block .kw {
+      color: var(--accent-2);
+      font-weight: 600;
+    }
+
+    .loop-block .fn {
+      color: var(--accent);
+    }
+
+    .loop-block .cmt {
+      color: var(--ink-faint);
+      font-style: italic;
+    }
+
+    /* Scenario cards */
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-5);
+      margin: var(--space-8) 0;
+    }
+
+    @media (max-width: 640px) {
+      .scenario-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .scenario-card {
+      padding: var(--space-6);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .scenario-card h4 {
+      font-family: var(--font-display);
+      font-size: var(--size-base);
+      font-weight: 500;
+      margin: 0 0 var(--space-3);
+      color: var(--ink);
+    }
+
+    .scenario-card p {
+      font-size: var(--size-sm);
+      color: var(--ink-secondary);
+      margin: 0;
+    }
+
+    .scenario-card ul {
+      font-size: var(--size-sm);
+      color: var(--ink-secondary);
+      padding-left: var(--space-5);
+      margin: var(--space-3) 0 0;
+    }
+
+    .scenario-card li {
+      margin-bottom: var(--space-1);
+    }
+
+    /* Override doc-table-wrap first-child for matrix */
+    .matrix-wrap td:first-child {
+      white-space: normal;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#question">核心问题</a>
+  <a href="#pi-agent">Pi Agent Core 全貌</a>
+  <a href="#openclaw-choice">OpenClaw 的选择</a>
+  <a href="#five-loops">五种核心循环</a>
+  <a href="#matrix">技术特性矩阵</a>
+  <a href="#claude-vs-pi">Claude SDK vs Pi Agent</a>
+  <a href="#scenarios">适用场景</a>
+  <a href="#takeaway">设计启示</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Agent Runtime 选型<br>Build vs Buy 的五种答案</h1>
+    <p class="doc-hero-subtitle">
+      你的 Agent 循环应该自己写，还是用现成的？从 Claude SDK 的黑盒运行时到 Rust 自建的企业级执行器，五个项目给出了五种截然不同的回答。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        跨项目对比分析
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: QUESTION ==================== -->
+  <section id="question" class="animate-in delay-1">
+    <h2>核心问题</h2>
+
+    <p>
+      构建一个 AI Agent 应用时，<strong>执行引擎（Agent Runtime）</strong>是最关键的基础设施决策之一。
+      它决定了 Agent 如何调用 LLM、如何执行工具、如何管理上下文——以及你对这些行为有多少控制权。
+    </p>
+
+    <p>我们研究了五个同源项目，它们面对同一个问题给出了不同的答案：</p>
+
+    <!-- Spectrum visualization -->
+    <div class="spectrum">
+      <div class="spectrum-title">Agent Runtime 设计光谱</div>
+      <div class="spectrum-bar">
+        <div class="spectrum-segment" style="background: #6366F1;">
+          <span class="spectrum-segment-name">Claude SDK</span>
+          <span class="spectrum-segment-lang">nanoclaw · TS</span>
+        </div>
+        <div class="spectrum-segment" style="background: #3B82F6;">
+          <span class="spectrum-segment-name">nanobot</span>
+          <span class="spectrum-segment-lang">Python</span>
+        </div>
+        <div class="spectrum-segment" style="background: #0D9488;">
+          <span class="spectrum-segment-name">Pi Agent</span>
+          <span class="spectrum-segment-lang">TypeScript</span>
+        </div>
+        <div class="spectrum-segment" style="background: #059669;">
+          <span class="spectrum-segment-name">picoclaw</span>
+          <span class="spectrum-segment-lang">Go</span>
+        </div>
+        <div class="spectrum-segment" style="background: #D14D35;">
+          <span class="spectrum-segment-name">IronClaw</span>
+          <span class="spectrum-segment-lang">Rust</span>
+        </div>
+      </div>
+      <div class="spectrum-labels">
+        <span>黑盒 · 零定制 · 快速上线</span>
+        <span>白盒 · 全定制 · 企业级</span>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        核心洞察
+      </div>
+      <p>这不是"谁更好"的问题，而是<strong>"你需要多少控制权"</strong>的问题。五个项目的选择背后，是对 Provider 数量、安全隔离、定制深度、部署约束的不同取舍。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PI AGENT ==================== -->
+  <section id="pi-agent">
+    <h2>Pi Agent Core 全貌</h2>
+
+    <p>
+      <strong>Pi Agent</strong> 是一个完整的 AI Agent 框架（monorepo，7 个包），由 <code>@mariozechner</code> 开发，
+      为 OpenClaw 提供了底层的 Agent 能力。理解 Pi Agent 的全貌，才能理解 OpenClaw 为什么只用了其中一部分。
+    </p>
+
+    <h3>三层架构</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">Pi Agent 架构分层</div>
+      <div class="flow-container">
+        <div class="flow-node" style="background:rgba(124,58,237,0.07);border:2px solid rgba(124,58,237,0.25);color:var(--accent-4);">
+          <strong>应用层：pi-coding-agent</strong><br>
+          <span style="font-size:0.8rem;">AgentSession（101KB）· CLI · 交互/打印/RPC 模式 · 扩展系统 · Compaction</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background:rgba(37,99,235,0.07);border:2px solid rgba(37,99,235,0.25);color:var(--accent-2);">
+          <strong>Agent 层：pi-agent-core</strong><br>
+          <span style="font-size:0.8rem;">Agent 类 · agentLoop() · 工具执行 · 事件系统 · Steering / Follow-up</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background:rgba(13,148,136,0.07);border:2px solid rgba(13,148,136,0.25);color:var(--accent-3);">
+          <strong>LLM 层：pi-ai</strong><br>
+          <span style="font-size:0.8rem;">streamSimple() · 24+ Provider · OAuth · Token 计数 · 流式解析</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>七个包</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>包</th>
+            <th>职责</th>
+            <th>规模</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>pi-ai</td>
+            <td>统一 LLM API 层，支持 Anthropic / OpenAI / Google / Bedrock 等 24+ Provider</td>
+            <td>18 个 Provider 实现</td>
+          </tr>
+          <tr>
+            <td>pi-agent-core</td>
+            <td>Agent 运行时：Agent 类、agentLoop()、事件流、工具执行</td>
+            <td>核心循环 ~3K LOC</td>
+          </tr>
+          <tr>
+            <td>pi-coding-agent</td>
+            <td>完整编码 Agent CLI：SessionManager、内置工具、扩展系统</td>
+            <td>AgentSession 101KB</td>
+          </tr>
+          <tr>
+            <td>pi-tui</td>
+            <td>终端 UI 框架：差分渲染、编辑器、Markdown 组件</td>
+            <td>10+ 组件</td>
+          </tr>
+          <tr>
+            <td>pi-mom</td>
+            <td>Slack 机器人集成</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>pi-web-ui</td>
+            <td>Web UI 组件（Lit + Tailwind）</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>pi-pods</td>
+            <td>vLLM GPU Pod 管理 CLI</td>
+            <td>—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>核心循环</h3>
+
+    <p>Pi Agent Core 的 <code>agentLoop()</code> 是整个框架的心脏：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">pi-mono/packages/agent/src/agent-loop.ts</span>
+      </div>
+      <pre><code class="language-typescript">// 简化后的核心循环
+async function agentLoop(config) {
+  emit("agent_start");
+
+  while (true) {
+    emit("turn_start");
+
+    // 1. 消息变换管线
+    const messages = await config.transformContext(allMessages);
+    const llmMessages = await config.convertToLlm(messages);
+
+    // 2. 流式调用 LLM
+    const response = await streamFn(model, llmMessages, options);
+
+    // 3. 工具执行（支持 Steering 中断）
+    if (response.toolCalls) {
+      for (const call of response.toolCalls) {
+        const result = await tool.execute(call);
+        // 检查是否有 Steering 消息打断
+        const steering = await config.getSteeringMessages?.();
+        if (steering.length > 0) break; // 中断剩余工具
+      }
+    }
+
+    emit("turn_end");
+
+    // 4. 检查 Follow-up 消息
+    if (!hasToolCalls && !followUps.length) break;
+  }
+
+  emit("agent_end");
+}</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        设计哲学
+      </div>
+      <p>Pi Agent 的哲学是<strong>"极简核心 + 扩展机制"</strong>——不内置 MCP、不内置子 Agent、不内置权限弹窗、不内置 Plan 模式。这些能力全部留给使用者通过扩展系统自行构建。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: OPENCLAW CHOICE ==================== -->
+  <section id="openclaw-choice">
+    <h2>OpenClaw 的选择：框架 vs 库</h2>
+
+    <p>
+      OpenClaw 面对 Pi Agent 的完整"整车方案"，做了一个明确的架构决策：
+      <strong>把 Pi Agent 当"库"用，而不是当"框架"用</strong>。
+    </p>
+
+    <h3>用了什么</h3>
+
+    <div class="feature-pills">
+      <span class="pill pill-yes">pi-ai · streamSimple()</span>
+      <span class="pill pill-yes">pi-ai · 消息类型</span>
+      <span class="pill pill-yes">pi-agent-core · 类型定义</span>
+      <span class="pill pill-yes">pi-coding-agent · SessionManager</span>
+      <span class="pill pill-yes">pi-coding-agent · 编码工具</span>
+      <span class="pill pill-yes">pi-coding-agent · ExtensionFactory</span>
+    </div>
+
+    <h3>没有用什么</h3>
+
+    <div class="feature-pills">
+      <span class="pill pill-no">pi-agent-core · Agent 类</span>
+      <span class="pill pill-no">pi-agent-core · agentLoop()</span>
+      <span class="pill pill-no">pi-coding-agent · AgentSession</span>
+      <span class="pill pill-no">pi-coding-agent · CLI</span>
+      <span class="pill pill-no">pi-tui · 终端 UI</span>
+      <span class="pill pill-no">pi-mom / pi-web-ui / pi-pods</span>
+    </div>
+
+    <h3>为什么不用"整车方案"</h3>
+
+    <p>
+      根本原因：<strong>Pi Agent 是为单用户单模型的终端编码助手设计的，OpenClaw 是多通道多用户多模型的 AI 网关。</strong>
+    </p>
+
+    <div class="doc-table-wrap">
+      <table class="matrix-table">
+        <thead>
+          <tr>
+            <th>需求维度</th>
+            <th>Pi Agent 假设</th>
+            <th>OpenClaw 需要</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>模型</td>
+            <td>单模型 + 单认证</td>
+            <td>多模型 Failover + Auth Profile 轮换</td>
+          </tr>
+          <tr>
+            <td>用户</td>
+            <td>单用户（终端操作者）</td>
+            <td>多用户，按用户/通道区分工具权限</td>
+          </tr>
+          <tr>
+            <td>工具执行</td>
+            <td>直接操作宿主文件系统</td>
+            <td>Docker 容器沙箱 + 按会话隔离进程</td>
+          </tr>
+          <tr>
+            <td>输出目标</td>
+            <td>单终端</td>
+            <td>Web / Gateway / Mobile 多表面推送</td>
+          </tr>
+          <tr>
+            <td>Provider 特异性</td>
+            <td>由 pi-ai 统一处理</td>
+            <td>需要逐一 patch（Gemini 消息序列、XAI 编码等）</td>
+          </tr>
+          <tr>
+            <td>上下文压缩</td>
+            <td>基础开关式</td>
+            <td>摘要质量校验 + Cache TTL 感知裁剪</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        Pi Agent 之于 OpenClaw，更像是<strong>"引擎零件"而非"整车方案"</strong>。
+        OpenClaw 取用了 Pi Agent 最成熟的零件（LLM 调用层 + 会话持久化 + 编码工具），
+        然后在其之上自建了多通道调度、权限控制、沙箱隔离等上层系统。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: FIVE LOOPS ==================== -->
+  <section id="five-loops">
+    <h2>五种核心循环</h2>
+
+    <p>
+      以下是五个项目的 Agent 执行引擎逐一拆解。每个项目的核心循环伪代码展示了它们各自的设计重心。
+    </p>
+
+    <!-- Pi Agent Core -->
+    <div class="project-card">
+      <div class="project-card-header">
+        <div class="project-card-icon" style="background:var(--accent-3);">Pi</div>
+        <div class="project-card-info">
+          <h4>Pi Agent Core</h4>
+          <span>TypeScript · 自建执行器 · ~3K LOC</span>
+        </div>
+      </div>
+      <div class="project-card-body">
+        <div class="loop-block">
+          <span class="kw">Agent</span>.prompt(text)<br>
+          &nbsp;&nbsp;<span class="fn">agentLoop</span>():<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">while</span>(true):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">transformContext</span>() → <span class="fn">convertToLlm</span>() → <span class="fn">streamSimple</span>()<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> tool_calls: <span class="fn">executeTools</span>() <span class="cmt">// 顺序执行，支持 Steering 中断</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> steering / follow-up: inject &amp; continue<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> text &amp; no follow-ups: <span class="kw">break</span>
+        </div>
+        <div class="feature-pills">
+          <span class="pill pill-highlight">三阶段消息管线</span>
+          <span class="pill pill-highlight">Steering 中断</span>
+          <span class="pill pill-highlight">Follow-up 排队</span>
+          <span class="pill pill-highlight">streamProxy 嵌入</span>
+          <span class="pill pill-yes">24+ Provider</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Claude SDK / nanoclaw -->
+    <div class="project-card">
+      <div class="project-card-header">
+        <div class="project-card-icon" style="background:#6366F1;">C</div>
+        <div class="project-card-info">
+          <h4>Claude Agent SDK — nanoclaw</h4>
+          <span>TypeScript · 无自建执行器 · 使用 @anthropic-ai/claude-agent-sdk</span>
+        </div>
+      </div>
+      <div class="project-card-body">
+        <div class="loop-block">
+          <span class="cmt">// nanoclaw 不自建执行器，委托给 Claude SDK</span><br>
+          Host(Node.js) → 启动 Docker 容器<br>
+          Container 内:<br>
+          &nbsp;&nbsp;<span class="kw">for await</span> (msg <span class="kw">of</span> <span class="fn">query</span>({ prompt, resume: sessionId })):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="cmt">// SDK 黑盒处理：LLM 调用 + 工具执行 + 上下文管理</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">writeOutput</span>(stdout markers) <span class="cmt">// 流式输出</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">pollIPC</span>() <span class="cmt">// 文件系统 IPC 注入后续消息</span><br>
+          &nbsp;&nbsp;<span class="kw">until</span> _close 哨兵文件
+        </div>
+        <div class="feature-pills">
+          <span class="pill pill-highlight">容器级隔离</span>
+          <span class="pill pill-highlight">文件系统 IPC</span>
+          <span class="pill pill-highlight">凭证代理注入</span>
+          <span class="pill pill-no">仅 Claude</span>
+          <span class="pill pill-no">无法定制循环</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- picoclaw -->
+    <div class="project-card">
+      <div class="project-card-header">
+        <div class="project-card-icon" style="background:#059669;">Go</div>
+        <div class="project-card-info">
+          <h4>picoclaw</h4>
+          <span>Go · 自建执行器 · ~1.8K LOC · &lt;10MB RAM</span>
+        </div>
+      </div>
+      <div class="project-card-body">
+        <div class="loop-block">
+          <span class="fn">AgentLoop.Run</span>(ctx):<br>
+          &nbsp;&nbsp;<span class="fn">bus.ConsumeInbound</span>() → <span class="fn">processMessage</span>(msg):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">runAgentLoop</span>(agent, opts):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;load session + summary<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">runLLMIteration</span>: <span class="kw">for</span> iter &lt; MaxIterations:<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fallback chain → 调用 LLM<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> tool_calls: <strong>并行执行</strong> (sync.WaitGroup)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tick tool TTL<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> text: <span class="kw">return</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">maybeSummarize</span>() <span class="cmt">// 异步 goroutine</span>
+        </div>
+        <div class="feature-pills">
+          <span class="pill pill-highlight">并行工具执行</span>
+          <span class="pill pill-highlight">Fallback Chain</span>
+          <span class="pill pill-highlight">BM25 工具发现</span>
+          <span class="pill pill-highlight">工具 TTL</span>
+          <span class="pill pill-yes">4-5 Provider</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- IronClaw -->
+    <div class="project-card">
+      <div class="project-card-header">
+        <div class="project-card-icon" style="background:var(--accent);">Rs</div>
+        <div class="project-card-info">
+          <h4>IronClaw</h4>
+          <span>Rust · 自建执行器 · ~20K LOC (agentic) · 生产级</span>
+        </div>
+      </div>
+      <div class="project-card-body">
+        <div class="loop-block">
+          <span class="fn">Agent.run</span>():<br>
+          &nbsp;&nbsp;spawn repair_loop, session_pruning, heartbeat, routine_engine<br>
+          &nbsp;&nbsp;<span class="kw">for</span> msg <span class="kw">in</span> channels.start_all():<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;Router → SessionManager → <span class="fn">run_agentic_loop</span>(delegate, reasoning, ctx):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">for</span> iter <span class="kw">in</span> 1..max:<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pre_llm_hook (cost guard, tool refresh)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">Reasoning.respond_with_tools</span>()<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> Text: <span class="fn">tool_intent_nudge</span>() <span class="cmt">// LLM 说要搜但没调工具 → 提醒</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> ToolCalls: <strong>3-phase</strong> (preflight → 并行 → post-flight)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ LoopOutcome::Response | NeedApproval | Stopped
+        </div>
+        <div class="feature-pills">
+          <span class="pill pill-highlight">LoopDelegate trait</span>
+          <span class="pill pill-highlight">3-phase 工具执行</span>
+          <span class="pill pill-highlight">工具审批流</span>
+          <span class="pill pill-highlight">WASM 沙箱</span>
+          <span class="pill pill-highlight">6 层 Provider 装饰器</span>
+          <span class="pill pill-yes">8+ Provider</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- nanobot -->
+    <div class="project-card">
+      <div class="project-card-header">
+        <div class="project-card-icon" style="background:#3B82F6;">Py</div>
+        <div class="project-card-info">
+          <h4>nanobot</h4>
+          <span>Python · 自建执行器 · ~500 LOC 核心循环</span>
+        </div>
+      </div>
+      <div class="project-card-body">
+        <div class="loop-block">
+          <span class="fn">AgentLoop.run</span>():<br>
+          &nbsp;&nbsp;<span class="fn">bus.consume_inbound</span>() → <span class="fn">_dispatch</span>(msg) <span class="cmt"># 全局锁</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">_process_message</span>(msg):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;session.get_or_create()<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">maybe_consolidate_by_tokens</span>()<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">_run_agent_loop</span>(messages, on_progress):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">while</span> iter &lt; 40:<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">provider.chat_with_retry</span>(messages, tools, model)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> tool_calls: execute each → append results<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">else</span>: <span class="kw">return</span> content
+        </div>
+        <div class="feature-pills">
+          <span class="pill pill-highlight">LLM 驱动 Memory Consolidation</span>
+          <span class="pill pill-highlight">Progress Callback</span>
+          <span class="pill pill-highlight">SubagentManager</span>
+          <span class="pill pill-yes">50+ Provider (LiteLLM)</span>
+          <span class="pill pill-no">全局锁限制并发</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: MATRIX ==================== -->
+  <section id="matrix">
+    <h2>关键技术特性矩阵</h2>
+
+    <div class="doc-table-wrap matrix-wrap">
+      <table class="matrix-table">
+        <thead>
+          <tr>
+            <th>特性</th>
+            <th>Pi Agent</th>
+            <th>Claude SDK</th>
+            <th>picoclaw</th>
+            <th>IronClaw</th>
+            <th>nanobot</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>语言</td>
+            <td>TypeScript</td>
+            <td>TypeScript</td>
+            <td>Go</td>
+            <td>Rust</td>
+            <td>Python</td>
+          </tr>
+          <tr>
+            <td>核心代码量</td>
+            <td class="cell-num">~3K</td>
+            <td class="cell-no">0（黑盒）</td>
+            <td class="cell-num">~1.8K</td>
+            <td class="cell-num">~20K</td>
+            <td class="cell-num">~500</td>
+          </tr>
+          <tr>
+            <td>LLM Provider 数</td>
+            <td class="cell-num">24+</td>
+            <td class="cell-num">1</td>
+            <td class="cell-num">4-5</td>
+            <td class="cell-num">8+</td>
+            <td class="cell-num">50+</td>
+          </tr>
+          <tr>
+            <td>流式输出</td>
+            <td class="cell-yes">EventStream</td>
+            <td class="cell-yes">SDK 内建</td>
+            <td class="cell-no">非流式</td>
+            <td>SSE 事件</td>
+            <td>Progress CB</td>
+          </tr>
+          <tr>
+            <td>工具执行</td>
+            <td>顺序 + Steering</td>
+            <td>SDK 管理</td>
+            <td class="cell-yes">并行</td>
+            <td class="cell-yes">并行 3-phase</td>
+            <td>顺序</td>
+          </tr>
+          <tr>
+            <td>运行中打断</td>
+            <td class="cell-yes">Steering</td>
+            <td>IPC 注入</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">Signal</td>
+            <td class="cell-no">无</td>
+          </tr>
+          <tr>
+            <td>工具审批流</td>
+            <td class="cell-no">无</td>
+            <td class="cell-no">无</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">完整</td>
+            <td class="cell-no">无</td>
+          </tr>
+          <tr>
+            <td>Failover</td>
+            <td class="cell-no">单模型</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">Chain + Cooldown</td>
+            <td class="cell-yes">6 层装饰器链</td>
+            <td>3 次重试</td>
+          </tr>
+          <tr>
+            <td>安全沙箱</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">Docker</td>
+            <td>工作区限制</td>
+            <td class="cell-yes">WASM + Docker</td>
+            <td class="cell-no">无</td>
+          </tr>
+          <tr>
+            <td>MCP 支持</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">自定义 Server</td>
+            <td class="cell-yes">发现 + TTL</td>
+            <td class="cell-yes">多传输</td>
+            <td class="cell-yes">懒加载</td>
+          </tr>
+          <tr>
+            <td>Session 持久化</td>
+            <td>JSONL 分支树</td>
+            <td>SDK + SQLite</td>
+            <td>JSONL</td>
+            <td>PostgreSQL</td>
+            <td>JSONL</td>
+          </tr>
+          <tr>
+            <td>多 Agent</td>
+            <td class="cell-no">单 Agent</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">Registry + 路由</td>
+            <td class="cell-yes">Scheduler + 子任务</td>
+            <td class="cell-yes">SubagentManager</td>
+          </tr>
+          <tr>
+            <td>定时任务</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">TaskScheduler</td>
+            <td class="cell-no">无</td>
+            <td class="cell-yes">RoutineEngine</td>
+            <td class="cell-yes">CronService</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: CLAUDE VS PI ==================== -->
+  <section id="claude-vs-pi">
+    <h2>Claude Agent SDK vs Pi Agent Core</h2>
+
+    <p>
+      这两者代表了 Agent Runtime 设计的两个极端：<strong>黑盒运行时</strong> vs <strong>白盒框架</strong>。
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card" style="border-color:rgba(99,102,241,0.2);background:rgba(99,102,241,0.03);">
+        <h4 style="color:#6366F1;">Claude Agent SDK</h4>
+        <p><strong>黑盒</strong> — 调用 <code>query()</code> 即获得完整的 Agent 循环、工具执行、Session 管理。开发者不需要（也无法）控制内部行为。</p>
+        <p>只能通过 <code>allowedTools</code>、<code>hooks</code>、<code>systemPrompt</code> 进行有限配置。</p>
+      </div>
+      <div class="compare-card" style="border-color:rgba(13,148,136,0.2);background:rgba(13,148,136,0.03);">
+        <h4 style="color:var(--accent-3);">Pi Agent Core</h4>
+        <p><strong>白盒</strong> — 提供 Agent 类和 agentLoop()，但 <code>transformContext</code>、<code>convertToLlm</code>、<code>streamFn</code> 全部可替换。</p>
+        <p>三阶段消息管线完全开放，开发者对每一步都有完全控制权。</p>
+      </div>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table class="matrix-table">
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>Claude Agent SDK</th>
+            <th>Pi Agent Core</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Provider 支持</td>
+            <td>仅 Claude（Anthropic）</td>
+            <td>24+ Provider</td>
+          </tr>
+          <tr>
+            <td>工具体系</td>
+            <td>内置 Claude Code 全套（Bash/Read/Write/Edit…）</td>
+            <td>内置编码工具 + ExtensionFactory</td>
+          </tr>
+          <tr>
+            <td>控制粒度</td>
+            <td class="cell-no">低 — hooks + allowedTools</td>
+            <td class="cell-yes">高 — 消息管线每步可替换</td>
+          </tr>
+          <tr>
+            <td>消息管线</td>
+            <td>不可见</td>
+            <td>AgentMessage → transform → convert → LLM</td>
+          </tr>
+          <tr>
+            <td>上手速度</td>
+            <td class="cell-yes">极快 — 一个 query() 调用</td>
+            <td>中等 — 需要理解三层架构</td>
+          </tr>
+          <tr>
+            <td>供应商锁定</td>
+            <td class="cell-no">强 — 绑定 Anthropic</td>
+            <td class="cell-yes">无 — 可接任何 Provider</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        选型陷阱
+      </div>
+      <p>Claude SDK 的"简单"是有代价的——当你需要多 Provider 切换、自定义工具执行策略、或白盒控制 Agent 行为时，SDK 的黑盒特性会成为阻碍。选型时需要评估：<strong>你当前的"简单"需求，是否会在产品演进中变成"锁定"风险？</strong></p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SCENARIOS ==================== -->
+  <section id="scenarios">
+    <h2>适用场景分析</h2>
+
+    <div class="scenario-grid">
+      <div class="scenario-card" style="border-left: 3px solid var(--accent-3);">
+        <h4>Pi Agent Core</h4>
+        <p><strong>可嵌入的多 Provider Agent 引擎</strong></p>
+        <ul>
+          <li>需要深度定制 Agent 行为的产品</li>
+          <li>需要多 LLM 提供商支持</li>
+          <li>浏览器/移动端嵌入（via streamProxy）</li>
+        </ul>
+      </div>
+
+      <div class="scenario-card" style="border-left: 3px solid #6366F1;">
+        <h4>Claude SDK (nanoclaw)</h4>
+        <p><strong>开箱即用的 Claude Agent 运行时</strong></p>
+        <ul>
+          <li>Claude 为唯一模型，快速上线</li>
+          <li>不需要自定义执行循环</li>
+          <li>注重容器隔离安全性</li>
+        </ul>
+      </div>
+
+      <div class="scenario-card" style="border-left: 3px solid #059669;">
+        <h4>picoclaw (Go)</h4>
+        <p><strong>极致轻量的嵌入式 Agent</strong></p>
+        <ul>
+          <li>资源受限设备（树莓派、IoT、&lt;10MB RAM）</li>
+          <li>Go 生态集成</li>
+          <li>大量 MCP 工具时的 TTL 发现机制</li>
+        </ul>
+      </div>
+
+      <div class="scenario-card" style="border-left: 3px solid var(--accent);">
+        <h4>IronClaw (Rust)</h4>
+        <p><strong>生产级高安全 Agent 平台</strong></p>
+        <ul>
+          <li>WASM 沙箱 + prompt injection 防御</li>
+          <li>工具审批流 + 成本护栏</li>
+          <li>企业级部署（PostgreSQL 持久化）</li>
+        </ul>
+      </div>
+
+      <div class="scenario-card" style="border-left: 3px solid #3B82F6; grid-column: 1 / -1;">
+        <h4>nanobot (Python)</h4>
+        <p><strong>最小可用 Agent 框架 · 500 行核心循环</strong></p>
+        <ul style="display:grid;grid-template-columns:1fr 1fr;gap:0 var(--space-8);">
+          <li>快速原型验证</li>
+          <li>Python 生态深度集成（数据科学、ML 管线）</li>
+          <li>最大 Provider 覆盖（LiteLLM 50+）</li>
+          <li>教学和学习 Agent 架构</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: TAKEAWAY ==================== -->
+  <section id="takeaway">
+    <h2>设计启示</h2>
+
+    <p>
+      五个执行器的对比揭示了一个清晰的<strong>选型框架</strong>——
+      Agent Runtime 的设计决策本质上是在三个维度上做取舍：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table class="matrix-table">
+        <thead>
+          <tr>
+            <th>取舍维度</th>
+            <th>选 Buy（SDK）</th>
+            <th>选 Build（自建）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Provider 锁定</td>
+            <td>可接受单一 Provider</td>
+            <td>需要多 Provider 或可能迁移</td>
+          </tr>
+          <tr>
+            <td>行为控制</td>
+            <td>默认行为已满足需求</td>
+            <td>需要自定义工具策略、审批流、安全策略</td>
+          </tr>
+          <tr>
+            <td>上市速度</td>
+            <td>快速验证优先</td>
+            <td>长期产品，愿意投入基础设施</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">最终总结</div>
+      <p>
+        <strong>Claude SDK</strong>（黑盒，零定制）→ <strong>nanobot</strong>（白盒，极简）→ <strong>Pi Agent Core</strong>（白盒，多 Provider + 可嵌入）→ <strong>picoclaw</strong>（白盒，极轻量 + 并行）→ <strong>IronClaw</strong>（白盒，安全 + 企业级）
+      </p>
+      <p style="margin-top:var(--space-4);">
+        没有"最好"的 Agent Runtime，只有<strong>最匹配你场景的</strong>。选型的核心问题永远是：<strong>你需要多少控制权？</strong>
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="doc-footer">
+    <p>
+      OpenClaw Architecture Deep Dive &middot;
+      <a href="../index.html">返回总览</a>
+    </p>
+  </footer>
+
+</main>
+
+<script>
+  // Syntax highlighting
+  hljs.highlightAll();
+
+  // Scroll progress bar
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // TOC active state tracking
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) {
+        currentId = section.id;
+      }
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  // Animate-in on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>
