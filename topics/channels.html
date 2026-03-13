@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>渠道适配架构：20+ 平台的统一接入 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的多渠道适配架构：ChannelPlugin 接口、Adapter 四层抽象、Plugin SDK 扩展体系、消息流转全路径">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#overview">渠道全景：从 9 到 40+</a>
+  <a href="#plugin-interface">ChannelPlugin 核心接口</a>
+  <a href="#adapters">四层 Adapter 抽象</a>
+  <a href="#registry">注册与发现机制</a>
+  <a href="#dock">Channel Dock：轻量级共享层</a>
+  <a href="#message-flow">消息流转全路径</a>
+  <a href="#extension">Extension 扩展开发</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>渠道适配架构<br>20+ 平台的统一接入</h1>
+    <p class="doc-hero-subtitle">
+      一套 ChannelPlugin 接口 + 15 种 Adapter 适配器 + Plugin SDK 扩展体系，让 Telegram、Discord、Slack、WhatsApp、iMessage、Signal、LINE、IRC、MS Teams、Matrix 等 40+ 渠道共享同一个 AI 网关。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/channels/plugins/types.plugin.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: OVERVIEW ==================== -->
+  <section id="overview" class="animate-in delay-1">
+    <h2>渠道全景：从 9 到 40+</h2>
+
+    <p>
+      OpenClaw 的核心使命是做一个<strong>多渠道 AI 网关</strong>——用户在任何一个消息平台上发消息，背后都由同一个 Agent 引擎处理。
+      为了实现这个目标，OpenClaw 将渠道分为两大类：<strong>内置渠道</strong>（Core Channels）和<strong>扩展渠道</strong>（Extension Channels）。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>类型</th>
+            <th>渠道列表</th>
+            <th>代码位置</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>内置渠道 (9)</strong></td>
+            <td>Telegram, WhatsApp, Discord, IRC, Google Chat, Slack, Signal, iMessage, LINE</td>
+            <td><code>src/telegram/</code>, <code>src/discord/</code>, <code>src/slack/</code>, <code>src/signal/</code>, <code>src/imessage/</code>, <code>src/web/</code> (WhatsApp)</td>
+          </tr>
+          <tr>
+            <td><strong>扩展渠道 (30+)</strong></td>
+            <td>MS Teams, Matrix, Mattermost, Feishu, Nostr, Zalo, Twitch, Synology Chat, Nextcloud Talk, BlueBubbles, Tlon, Voice Call ...</td>
+            <td><code>extensions/msteams/</code>, <code>extensions/matrix/</code>, <code>extensions/feishu/</code> 等</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      内置渠道在 <code>src/channels/registry.ts</code> 中通过 <code>CHAT_CHANNEL_ORDER</code> 硬编码排序，而扩展渠道通过 Plugin SDK 的 <code>api.registerChannel()</code> 动态注册。
+      两类渠道共享<strong>完全相同的 ChannelPlugin 接口</strong>——对 Agent 引擎来说，它们没有区别。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/channels/registry.ts</span>
+      </div>
+      <pre><code class="language-typescript">export const CHAT_CHANNEL_ORDER = [
+  "telegram",
+  "whatsapp",
+  "discord",
+  "irc",
+  "googlechat",
+  "slack",
+  "signal",
+  "imessage",
+  "line",
+] as const;
+
+export type ChatChannelId = (typeof CHAT_CHANNEL_ORDER)[number];</code></pre>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        设计洞察
+      </div>
+      <p>内置渠道与扩展渠道的<strong>唯一区别</strong>是代码位置——内置在 <code>src/</code>，扩展在 <code>extensions/</code>。它们都实现同一个 <code>ChannelPlugin</code> 接口，都通过同一套 Plugin Registry 被发现和加载。这意味着任何扩展渠道都可以在不修改核心代码的情况下，获得与内置渠道完全相同的能力。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PLUGIN INTERFACE ==================== -->
+  <section id="plugin-interface" class="animate-in delay-2">
+    <h2>ChannelPlugin 核心接口</h2>
+
+    <p>
+      每个渠道（无论内置还是扩展）都必须实现 <code>ChannelPlugin</code> 接口。这个接口定义在 <code>src/channels/plugins/types.plugin.ts</code> 中，
+      是整个渠道系统的<strong>契约（contract）</strong>。来看它的完整结构：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/channels/plugins/types.plugin.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type ChannelPlugin&lt;ResolvedAccount = any, Probe = unknown, Audit = unknown&gt; = {
+  id: ChannelId;
+  meta: ChannelMeta;
+  capabilities: ChannelCapabilities;
+  defaults?: {
+    queue?: { debounceMs?: number };
+  };
+  reload?: { configPrefixes: string[]; noopPrefixes?: string[] };
+
+  // === 核心适配器 ===
+  onboarding?: ChannelOnboardingAdapter;     // CLI 引导向导
+  config: ChannelConfigAdapter&lt;ResolvedAccount&gt;; // 配置读取（必选）
+  configSchema?: ChannelConfigSchema;        // JSON Schema
+  setup?: ChannelSetupAdapter;               // 账户设置
+  pairing?: ChannelPairingAdapter;           // 配对 / 授权
+  security?: ChannelSecurityAdapter;         // DM 安全策略
+  groups?: ChannelGroupAdapter;              // 群组策略
+  mentions?: ChannelMentionAdapter;          // @提及处理
+  outbound?: ChannelOutboundAdapter;         // 出站消息
+  status?: ChannelStatusAdapter;             // 状态 / 探活
+  gateway?: ChannelGatewayAdapter;           // Gateway 生命周期
+  auth?: ChannelAuthAdapter;                 // 登录认证
+  elevated?: ChannelElevatedAdapter;         // 提权控制
+  commands?: ChannelCommandAdapter;          // 命令控制
+  streaming?: ChannelStreamingAdapter;       // 流式回复
+  threading?: ChannelThreadingAdapter;       // 线程/话题
+  messaging?: ChannelMessagingAdapter;       // 目标解析
+  agentPrompt?: ChannelAgentPromptAdapter;   // Agent 提示词
+  directory?: ChannelDirectoryAdapter;       // 联系人目录
+  resolver?: ChannelResolverAdapter;         // 目标名解析
+  actions?: ChannelMessageActionAdapter;     // 消息动作（按钮等）
+  heartbeat?: ChannelHeartbeatAdapter;       // 心跳检查
+  agentTools?: ChannelAgentToolFactory | ChannelAgentTool[]; // 渠道 Agent 工具
+};</code></pre>
+    </div>
+
+    <p>
+      这里有几个关键设计要点：
+    </p>
+    <ul>
+      <li><strong><code>config</code> 是唯一的必选 Adapter</strong>——它提供账户列表、账户解析等基础能力，所有渠道都需要。</li>
+      <li><strong>其余 15+ Adapter 全部可选</strong>——渠道按需实现。一个简单的 webhook 渠道可能只需要 <code>config</code> + <code>gateway</code> + <code>outbound</code>。</li>
+      <li><strong><code>capabilities</code> 声明渠道能力</strong>——告诉 Agent 引擎此渠道是否支持投票、Reaction、媒体、线程等功能。</li>
+    </ul>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/channels/plugins/types.core.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type ChannelCapabilities = {
+  chatTypes: Array&lt;ChatType | "thread"&gt;;  // "direct" | "group" | "channel" | "thread"
+  polls?: boolean;           // 投票
+  reactions?: boolean;       // 表情回应
+  edit?: boolean;            // 消息编辑
+  unsend?: boolean;          // 撤回
+  reply?: boolean;           // 引用回复
+  effects?: boolean;         // 消息特效
+  groupManagement?: boolean; // 群管理
+  threads?: boolean;         // 线程/子话题
+  media?: boolean;           // 媒体（图片/文件）
+  nativeCommands?: boolean;  // 原生命令菜单
+  blockStreaming?: boolean;  // 分块流式传输
+};</code></pre>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>可以把 <code>ChannelPlugin</code> 想象成一个<strong>万用充电器接口</strong>。USB-C 定义了电力传输和数据传输的标准协议，但不同设备可以只用其中一部分功能——手机用充电 + 数据，耳机只用充电。同理，ChannelPlugin 定义了完整的渠道能力模板，但每个渠道根据自身特性只实现需要的 Adapter。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: ADAPTERS ==================== -->
+  <section id="adapters" class="animate-in delay-1">
+    <h2>四层 Adapter 抽象</h2>
+
+    <p>
+      ChannelPlugin 的 15+ Adapter 可以按职责归纳为四个层次。
+      这种分层确保了关注点分离——认证逻辑不会混入格式化逻辑，安全策略不会散落在消息解析中。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">渠道 Adapter 四层架构</div>
+      <div class="flow-container" style="flex-direction: column; gap: 0;">
+        <div class="flow-node flow-node-exec" style="width: 80%; margin: 0 auto;">
+          <strong>Layer 4: 生命周期与运维</strong><br>
+          gateway &middot; status &middot; heartbeat &middot; auth
+        </div>
+        <div class="flow-arrow" style="justify-content: center; margin: 4px 0;">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main" style="width: 80%; margin: 0 auto;">
+          <strong>Layer 3: 安全与控制</strong><br>
+          security &middot; pairing &middot; commands &middot; elevated &middot; groups
+        </div>
+        <div class="flow-arrow" style="justify-content: center; margin: 4px 0;">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-session" style="width: 80%; margin: 0 auto;">
+          <strong>Layer 2: 消息处理</strong><br>
+          outbound &middot; streaming &middot; threading &middot; mentions &middot; actions &middot; messaging
+        </div>
+        <div class="flow-arrow" style="justify-content: center; margin: 4px 0;">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="width: 80%; margin: 0 auto; background: var(--card-bg); border: 1px solid var(--border); padding: 12px; border-radius: 8px; text-align: center;">
+          <strong>Layer 1: 配置与身份</strong><br>
+          config &middot; setup &middot; onboarding &middot; configSchema &middot; directory &middot; resolver
+        </div>
+      </div>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>层次</th>
+            <th>Adapter</th>
+            <th>职责</th>
+            <th>典型方法</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td rowspan="4"><strong>生命周期</strong></td>
+            <td><code>gateway</code></td>
+            <td>启停账户、QR 登录、登出</td>
+            <td><code>startAccount()</code>, <code>stopAccount()</code></td>
+          </tr>
+          <tr>
+            <td><code>status</code></td>
+            <td>探活、审计、快照</td>
+            <td><code>probeAccount()</code>, <code>buildAccountSnapshot()</code></td>
+          </tr>
+          <tr>
+            <td><code>heartbeat</code></td>
+            <td>心跳检查、收件人解析</td>
+            <td><code>checkReady()</code>, <code>resolveRecipients()</code></td>
+          </tr>
+          <tr>
+            <td><code>auth</code></td>
+            <td>登录认证流程</td>
+            <td><code>login()</code></td>
+          </tr>
+          <tr>
+            <td rowspan="4"><strong>安全控制</strong></td>
+            <td><code>security</code></td>
+            <td>DM 策略（白名单/配对）</td>
+            <td><code>resolveDmPolicy()</code></td>
+          </tr>
+          <tr>
+            <td><code>pairing</code></td>
+            <td>设备配对与审批</td>
+            <td><code>notifyApproval()</code></td>
+          </tr>
+          <tr>
+            <td><code>commands</code></td>
+            <td>命令权限控制</td>
+            <td><code>enforceOwnerForCommands</code></td>
+          </tr>
+          <tr>
+            <td><code>groups</code></td>
+            <td>群组策略（@提及/工具）</td>
+            <td><code>resolveRequireMention()</code>, <code>resolveToolPolicy()</code></td>
+          </tr>
+          <tr>
+            <td rowspan="4"><strong>消息处理</strong></td>
+            <td><code>outbound</code></td>
+            <td>出站消息发送</td>
+            <td><code>sendText()</code>, <code>sendMedia()</code>, <code>sendPoll()</code></td>
+          </tr>
+          <tr>
+            <td><code>streaming</code></td>
+            <td>流式回复配置</td>
+            <td><code>blockStreamingCoalesceDefaults</code></td>
+          </tr>
+          <tr>
+            <td><code>threading</code></td>
+            <td>线程/话题路由</td>
+            <td><code>resolveReplyToMode()</code>, <code>buildToolContext()</code></td>
+          </tr>
+          <tr>
+            <td><code>mentions</code></td>
+            <td>@提及识别与剥离</td>
+            <td><code>stripPatterns()</code></td>
+          </tr>
+          <tr>
+            <td rowspan="3"><strong>配置身份</strong></td>
+            <td><code>config</code></td>
+            <td>账户列表与解析</td>
+            <td><code>listAccountIds()</code>, <code>resolveAccount()</code></td>
+          </tr>
+          <tr>
+            <td><code>setup</code></td>
+            <td>账户创建与配置写入</td>
+            <td><code>applyAccountConfig()</code></td>
+          </tr>
+          <tr>
+            <td><code>directory</code></td>
+            <td>联系人/群组目录查询</td>
+            <td><code>listPeers()</code>, <code>listGroups()</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      以 <code>ChannelOutboundAdapter</code> 为例，它定义了出站消息的完整发送协议：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/channels/plugins/types.adapters.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type ChannelOutboundAdapter = {
+  deliveryMode: "direct" | "gateway" | "hybrid";
+  chunker?: ((text: string, limit: number) =&gt; string[]) | null;
+  chunkerMode?: "text" | "markdown";
+  textChunkLimit?: number;
+  pollMaxOptions?: number;
+  resolveTarget?: (params: {
+    cfg?: OpenClawConfig; to?: string;
+    allowFrom?: string[]; accountId?: string | null;
+    mode?: ChannelOutboundTargetMode;
+  }) =&gt; { ok: true; to: string } | { ok: false; error: Error };
+  sendText?: (ctx: ChannelOutboundContext) =&gt; Promise&lt;OutboundDeliveryResult&gt;;
+  sendMedia?: (ctx: ChannelOutboundContext) =&gt; Promise&lt;OutboundDeliveryResult&gt;;
+  sendPoll?: (ctx: ChannelPollContext) =&gt; Promise&lt;ChannelPollResult&gt;;
+};</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+        关键设计
+      </div>
+      <p><code>deliveryMode</code> 决定出站路径：<code>"direct"</code> 表示渠道插件直接调用平台 API 发送；<code>"gateway"</code> 表示走 Gateway HTTP 代理；<code>"hybrid"</code> 表示两种模式都支持，按条件自动选择。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: REGISTRY ==================== -->
+  <section id="registry" class="animate-in delay-1">
+    <h2>注册与发现机制</h2>
+
+    <p>
+      渠道的注册、发现和生命周期管理分散在几个协作模块中：
+    </p>
+
+    <div class="flow-container">
+      <div class="flow-node flow-node-session">
+        <strong>Plugin Discovery</strong><br>
+        <code>plugins/discovery.ts</code><br>
+        扫描 workspace、global、bundled 路径
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <span class="flow-arrow-label">manifest</span>
+      </div>
+      <div class="flow-node flow-node-main">
+        <strong>Plugin Registry</strong><br>
+        <code>plugins/runtime.ts</code><br>
+        全局注册表 + version 缓存
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <span class="flow-arrow-label">channel[]</span>
+      </div>
+      <div class="flow-node flow-node-exec">
+        <strong>Channel Index</strong><br>
+        <code>channels/plugins/index.ts</code><br>
+        排序、去重、按 ID 查找
+      </div>
+    </div>
+
+    <p>
+      <code>channels/plugins/index.ts</code> 提供了最终的渠道查询 API。它从 Plugin Registry 拉取所有已注册的 channel 条目，按 <code>CHAT_CHANNEL_ORDER</code> 排序（内置渠道优先），然后去重并缓存：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/channels/plugins/index.ts</span>
+      </div>
+      <pre><code class="language-typescript">function resolveCachedChannelPlugins(): CachedChannelPlugins {
+  const registry = requireActivePluginRegistry();
+  const registryVersion = getActivePluginRegistryVersion();
+  const cached = cachedChannelPlugins;
+  if (cached.registryVersion === registryVersion) {
+    return cached;  // 版本未变，直接返回缓存
+  }
+
+  const sorted = dedupeChannels(
+    registry.channels.map((entry) =&gt; entry.plugin)
+  ).toSorted((a, b) =&gt; {
+    const indexA = CHAT_CHANNEL_ORDER.indexOf(a.id as ChatChannelId);
+    const indexB = CHAT_CHANNEL_ORDER.indexOf(b.id as ChatChannelId);
+    const orderA = a.meta.order ?? (indexA === -1 ? 999 : indexA);
+    const orderB = b.meta.order ?? (indexB === -1 ? 999 : indexB);
+    return orderA !== orderB ? orderA - orderB : a.id.localeCompare(b.id);
+  });
+  // ...构建 byId Map 并缓存
+}</code></pre>
+    </div>
+
+    <p>
+      扩展渠道的注册入口是 <code>api.registerChannel()</code>。以 MS Teams 为例：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">extensions/msteams/index.ts</span>
+      </div>
+      <pre><code class="language-typescript">import type { OpenClawPluginApi } from "openclaw/plugin-sdk/msteams";
+import { msteamsPlugin } from "./src/channel.js";
+
+const plugin = {
+  id: "msteams",
+  name: "Microsoft Teams",
+  description: "Microsoft Teams channel plugin (Bot Framework)",
+  configSchema: emptyPluginConfigSchema(),
+  register(api: OpenClawPluginApi) {
+    setMSTeamsRuntime(api.runtime);
+    api.registerChannel({ plugin: msteamsPlugin });
+  },
+};
+
+export default plugin;</code></pre>
+    </div>
+
+    <p>
+      Plugin Discovery 按优先级扫描四种来源：
+    </p>
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>优先级</th>
+            <th>来源 (origin)</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>0 (最高)</td><td><code>config</code></td><td>用户配置文件中指定的插件路径</td></tr>
+          <tr><td>1</td><td><code>workspace</code></td><td>当前工作区的 <code>extensions/*</code> 目录</td></tr>
+          <tr><td>2</td><td><code>global</code></td><td>全局安装的 npm 包</td></tr>
+          <tr><td>3 (最低)</td><td><code>bundled</code></td><td>OpenClaw 自带的内置插件</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        缓存策略
+      </div>
+      <p>渠道列表使用 <code>registryVersion</code> 做变化检测。每次 Plugin Registry 有变化时 version 递增，查询时如果 version 与缓存一致则直接返回上次结果，避免重复排序和 Map 构建。这是一种<strong>无锁的版本化缓存</strong>，非常适合单进程 Node.js 架构。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: DOCK ==================== -->
+  <section id="dock" class="animate-in delay-1">
+    <h2>Channel Dock：轻量级共享层</h2>
+
+    <p>
+      ChannelPlugin 接口很强大，但也很"重"——它可能导入 monitor、web login、puppeteer 等大量依赖。
+      为了让<strong>共享代码路径</strong>（回复流、命令权限、沙盒等）能安全地引用渠道行为而不触发这些昂贵导入，
+      OpenClaw 引入了 <code>ChannelDock</code>——一个轻量级的渠道行为子集。
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-bad">
+        <h4>ChannelPlugin（重量级）</h4>
+        <ul>
+          <li>完整的 15+ Adapter</li>
+          <li>可能导入 monitor、login 等模块</li>
+          <li>只在执行边界（如 Gateway 启动）加载</li>
+        </ul>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4>ChannelDock（轻量级）</h4>
+        <ul>
+          <li>仅 capabilities、config、groups、mentions、threading</li>
+          <li>只引用配置读取器和格式化器</li>
+          <li>可安全在任何代码路径中导入</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/channels/dock.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type ChannelDock = {
+  id: ChannelId;
+  capabilities: ChannelCapabilities;
+  commands?: ChannelCommandAdapter;
+  outbound?: { textChunkLimit?: number };
+  streaming?: ChannelDockStreaming;
+  elevated?: ChannelElevatedAdapter;
+  config?: Pick&lt;ChannelConfigAdapter&lt;unknown&gt;,
+    "resolveAllowFrom" | "formatAllowFrom" | "resolveDefaultTo"&gt;;
+  groups?: ChannelGroupAdapter;
+  mentions?: ChannelMentionAdapter;
+  threading?: ChannelThreadingAdapter;
+  agentPrompt?: ChannelAgentPromptAdapter;
+};
+
+// 内置渠道预定义 Dock
+const DOCKS: Record&lt;ChatChannelId, ChannelDock&gt; = {
+  telegram: {
+    id: "telegram",
+    capabilities: {
+      chatTypes: ["direct", "group", "channel", "thread"],
+      nativeCommands: true,
+      blockStreaming: true,
+    },
+    outbound: { textChunkLimit: 4000 },
+    // ...config, groups, threading
+  },
+  discord: {
+    id: "discord",
+    capabilities: {
+      chatTypes: ["direct", "channel", "thread"],
+      polls: true, reactions: true, media: true,
+      nativeCommands: true, threads: true,
+    },
+    outbound: { textChunkLimit: 2000 },
+    // ...
+  },
+  // ... 其余 7 个内置渠道
+};</code></pre>
+    </div>
+
+    <p>
+      扩展渠道的 Dock 由 <code>buildDockFromPlugin()</code> 自动从 ChannelPlugin 提取。
+      共享代码应该使用 <code>getChannelDock(id)</code> 而非 <code>getChannelPlugin(id)</code>。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: MESSAGE FLOW ==================== -->
+  <section id="message-flow" class="animate-in delay-1">
+    <h2>消息流转全路径</h2>
+
+    <p>
+      一条来自 Telegram 的用户消息，从接收到最终回复，经历以下完整路径：
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">入站消息处理流程</div>
+      <div class="flow-container" style="flex-wrap: wrap;">
+        <div class="flow-node" style="background: var(--card-bg); border: 1px solid var(--border); padding: 10px; border-radius: 8px; text-align: center; min-width: 120px;">
+          <strong>1. Platform</strong><br>
+          Telegram Bot API<br>
+          推送 Update
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-session" style="min-width: 120px;">
+          <strong>2. Monitor</strong><br>
+          <code>bot-message.ts</code><br>
+          鉴权 + 解析
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main" style="min-width: 120px;">
+          <strong>3. Normalize</strong><br>
+          <code>normalize/</code><br>
+          统一 MsgContext
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec" style="min-width: 120px;">
+          <strong>4. Envelope</strong><br>
+          <code>inbound-envelope.ts</code><br>
+          路由 + 会话
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background: var(--card-bg); border: 1px solid var(--accent); padding: 10px; border-radius: 8px; text-align: center; min-width: 120px;">
+          <strong>5. Agent Run</strong><br>
+          <code>auto-reply/</code><br>
+          AI 回复
+        </div>
+      </div>
+    </div>
+
+    <p><strong>Step 1-2: 平台接入 + Monitor</strong></p>
+    <p>
+      每个内置渠道有自己的 Monitor 模块（如 <code>src/telegram/bot-message.ts</code>、<code>src/discord/monitor/message-handler.ts</code>、<code>src/slack/monitor/message-handler.ts</code>）。
+      Monitor 负责接收平台事件、验证权限（allowFrom / DM 策略 / mention gating）、过滤自身消息（防止回环）。
+    </p>
+
+    <p><strong>Step 3: Normalize 统一格式</strong></p>
+    <p>
+      <code>src/channels/plugins/normalize/</code> 目录下有每个渠道的消息标准化器（telegram.ts, discord.ts, slack.ts, signal.ts, imessage.ts, whatsapp.ts）。它们将平台特定的消息格式转换为统一的 <code>MsgContext</code>，包含 Body, From, To, ChatType, OriginatingChannel, MediaPath 等 20+ 字段。
+    </p>
+
+    <p><strong>Step 4: Envelope 路由</strong></p>
+    <p>
+      <code>InboundEnvelope</code> 将标准化后的消息封装为路由信封，解析出 <code>agentId</code> + <code>sessionKey</code>，确定此消息应该交给哪个 Agent、哪个会话处理。
+    </p>
+
+    <p><strong>Step 5: Agent Run</strong></p>
+    <p>
+      消息通过 <code>auto-reply/</code> 流水线进入 Agent 引擎。这里将触发 Queue Mode 调度（详见消息处理模式篇），然后执行 AI 推理、工具调用，最终通过 <code>outbound</code> Adapter 将回复发送回原始渠道。
+    </p>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        出站路由精确定位
+      </div>
+      <p>出站回复通过 <code>originatingChannel</code>、<code>originatingTo</code>、<code>originatingAccountId</code>、<code>originatingThreadId</code> 四个字段精确路由回消息来源。这确保了用户在 Telegram Topic A 中提问，回复一定出现在 Topic A；在 Discord Thread B 中提问，回复一定出现在 Thread B。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: EXTENSION ==================== -->
+  <section id="extension" class="animate-in delay-1">
+    <h2>Extension 扩展开发</h2>
+
+    <p>
+      OpenClaw 的扩展渠道是独立的 pnpm workspace 包，位于 <code>extensions/</code> 目录。每个扩展是一个标准的 npm 包，可以独立安装和发布。当前已有 <strong>40 个</strong> 扩展包（截至 2026 年 3 月）。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>类别</th>
+            <th>扩展名</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>企业通信</strong></td>
+            <td>msteams, slack, feishu, googlechat, mattermost, synology-chat</td>
+          </tr>
+          <tr>
+            <td><strong>即时通信</strong></td>
+            <td>matrix, zalo, zalouser, nextcloud-talk, tlon, nostr</td>
+          </tr>
+          <tr>
+            <td><strong>社交/直播</strong></td>
+            <td>irc, twitch, discord</td>
+          </tr>
+          <tr>
+            <td><strong>Apple 生态</strong></td>
+            <td>bluebubbles, imessage</td>
+          </tr>
+          <tr>
+            <td><strong>语音通话</strong></td>
+            <td>voice-call, talk-voice, phone-control</td>
+          </tr>
+          <tr>
+            <td><strong>AI / 运行时</strong></td>
+            <td>acpx, llm-task, lobster, open-prose, copilot-proxy, google-gemini-cli-auth, minimax-portal-auth, qwen-portal-auth</td>
+          </tr>
+          <tr>
+            <td><strong>基础设施</strong></td>
+            <td>diffs, diagnostics-otel, device-pair, memory-core, memory-lancedb, thread-ownership, line, telegram, signal, whatsapp, shared, test-utils</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      开发一个新的渠道扩展的<strong>最小集</strong>只需三步：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">extensions/my-channel/index.ts（入口）</span>
+      </div>
+      <pre><code class="language-typescript">import type { OpenClawPluginApi } from "openclaw/plugin-sdk/my-channel";
+import { myChannelPlugin } from "./src/channel.js";
+
+export default {
+  id: "my-channel",
+  name: "My Channel",
+  description: "Custom webhook channel integration.",
+  configSchema: emptyPluginConfigSchema(),
+  register(api: OpenClawPluginApi) {
+    api.registerChannel({ plugin: myChannelPlugin });
+  },
+};</code></pre>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">extensions/my-channel/src/channel.ts（ChannelPlugin 实现）</span>
+      </div>
+      <pre><code class="language-typescript">export const myChannelPlugin: ChannelPlugin = {
+  id: "my-channel",
+  meta: {
+    id: "my-channel", label: "My Channel",
+    selectionLabel: "My Channel (Webhook)",
+    docsPath: "/channels/my-channel",
+    blurb: "Custom webhook channel.",
+    order: 90,
+  },
+  capabilities: { chatTypes: ["direct", "group"], media: true },
+  config: {
+    listAccountIds: () =&gt; ["default"],
+    resolveAccount: (cfg) =&gt; ({ /* ... */ }),
+  },
+  gateway: {
+    startAccount: async (ctx) =&gt; {
+      // 使用 ctx.channelRuntime?.reply 调度 AI 回复
+    },
+  },
+  outbound: {
+    deliveryMode: "direct",
+    sendText: async (ctx) =&gt; { /* 发送文本 */ },
+  },
+};</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+        channelRuntime (Plugin SDK 2026.2.19+)
+      </div>
+      <p><code>ChannelGatewayContext</code> 的 <code>channelRuntime</code> 字段为外部扩展提供 <strong>reply</strong>（AI 回复调度）、<strong>routing</strong>（Agent 路由）、<strong>session</strong>（会话管理）、<strong>media</strong>（媒体处理）、<strong>commands</strong>（命令授权）、<strong>groups</strong>（群组策略）、<strong>pairing</strong>（配对管理）等高级能力，让外部扩展无需直接导入内部模块。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source" class="animate-in delay-1">
+    <h2>源码索引</h2>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>src/channels/plugins/types.plugin.ts</code></td><td>ChannelPlugin 主接口定义</td></tr>
+          <tr><td><code>src/channels/plugins/types.core.ts</code></td><td>ChannelCapabilities、ChannelMeta 等核心类型</td></tr>
+          <tr><td><code>src/channels/plugins/types.adapters.ts</code></td><td>15 种 Adapter 类型定义（gateway / outbound / security ...）</td></tr>
+          <tr><td><code>src/channels/plugins/index.ts</code></td><td>渠道插件运行时注册表（查询 + 缓存）</td></tr>
+          <tr><td><code>src/channels/plugins/catalog.ts</code></td><td>插件目录发现（安装、外部目录、npm）</td></tr>
+          <tr><td><code>src/channels/registry.ts</code></td><td>内置渠道排序、别名映射、ChannelMeta</td></tr>
+          <tr><td><code>src/channels/dock.ts</code></td><td>ChannelDock 轻量级共享层（无 monitor 导入）</td></tr>
+          <tr><td><code>src/channels/plugins/normalize/</code></td><td>每个渠道的消息标准化器</td></tr>
+          <tr><td><code>src/plugin-sdk/index.ts</code></td><td>Plugin SDK 公共导出（800+ 行）</td></tr>
+          <tr><td><code>src/plugin-sdk/inbound-envelope.ts</code></td><td>入站消息信封构建器</td></tr>
+          <tr><td><code>extensions/*/</code></td><td>40 个扩展包（渠道 + AI + 基础设施）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; <a href="../index.html">返回总览</a></p>
+  </footer>
+</main>
+
+<script>
+  hljs.highlightAll();
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) currentId = section.id;
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

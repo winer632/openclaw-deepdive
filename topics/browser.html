@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser 自动化 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的 Browser 自动化系统：双层 CDP+Playwright 架构、Browser Profiles、AI Snapshot、Chrome Extension Relay 模式">
+  <link rel="stylesheet" href="../assets/style.css">
+  <!-- Syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents (fixed side panel on wide screens) -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#dual-layer">双层架构（CDP + Playwright）</a>
+  <a href="#profiles">Browser Profiles</a>
+  <a href="#snapshot">Snapshot 系统</a>
+  <a href="#extension-relay">Chrome Extension Relay</a>
+  <a href="#wait">Wait 等待机制</a>
+  <a href="#tool-integration">与 Tool 系统集成</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Browser 自动化</h1>
+    <p class="doc-hero-subtitle">
+      CDP 直连与 Playwright 双层驱动，支持管理浏览器、Chrome 接管、Docker 沙箱浏览器三种模式。
+      AI Snapshot 和 Role Snapshot 让 Agent 像人一样"看到"并操作网页。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/browser/
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: DUAL LAYER ==================== -->
+  <section id="dual-layer" class="animate-in delay-1">
+    <h2>双层架构（CDP + Playwright）</h2>
+
+    <p>
+      OpenClaw 的浏览器自动化不是简单地调用 Playwright API，而是构建了一个<strong>双层架构</strong>：
+      底层直接使用 <strong>Chrome DevTools Protocol（CDP）</strong> 进行底层通信，
+      上层通过 <strong>Playwright</strong> 提供高级页面操作抽象。
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-2);">底层：CDP 直连</h4>
+        <p>
+          通过 WebSocket 直接与 Chrome/Chromium 的 DevTools Protocol 通信。
+          用于底层操作：截图（<code>Page.captureScreenshot</code>）、
+          Accessibility Tree 获取（<code>Accessibility.getFullAXTree</code>）、
+          网络拦截等。
+        </p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">上层：Playwright</h4>
+        <p>
+          通过 <code>chromium.connectOverCDP()</code> 连接已有浏览器实例。
+          提供高级 API：点击、填表、导航、等待、Snapshot、
+          Cookie/Storage 管理等。
+        </p>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <div class="diagram-title">双层架构数据流</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>Agent Browser Tool</strong><br>
+          <span style="font-size:0.8rem;">browser(action="snapshot") / browser(action="act", kind="click")</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">HTTP API 调用 Browser Control Server</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>Browser Control Server</strong><br>
+          <span style="font-size:0.8rem;">HTTP 服务，路由到 CDP 或 Playwright 层</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">按操作类型分流</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div style="display:flex;gap:var(--space-4);width:100%;max-width:440px;">
+          <div class="flow-node flow-node-exec" style="flex:1;">
+            <strong>CDP</strong><br>
+            <span style="font-size:0.7rem;">WebSocket</span>
+          </div>
+          <div class="flow-node" style="flex:1;background: var(--accent-3-soft); border: 2px solid rgba(13, 148, 136, 0.25); color: var(--accent-3);">
+            <strong>Playwright</strong><br>
+            <span style="font-size:0.7rem;">connectOverCDP</span>
+          </div>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">操控同一浏览器实例</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background: var(--accent-soft); border: 2px solid rgba(209, 77, 53, 0.25); color: var(--accent);">
+          <strong>Chrome / Chromium</strong><br>
+          <span style="font-size:0.8rem;">--remote-debugging-port 开启 CDP 端点</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        为什么需要双层
+      </div>
+      <p><strong>CDP 层</strong>提供了 Playwright 不暴露的底层能力（如 Accessibility Tree 原始数据、精细的协议级控制），并支持 WebSocket URL 重写（containerized browser 场景）。</p>
+      <p><strong>Playwright 层</strong>提供了可靠的高级自动化 API（自动等待、智能定位、事件监听），并且通过 <code>_snapshotForAI</code> 接口提供 AI 友好的页面快照。</p>
+    </div>
+
+    <h3>CDP URL 规范化</h3>
+
+    <p>
+      容器化浏览器（如 Docker sandbox 或 Browserless）报告的 WebSocket URL 可能是内部地址（如 <code>ws://0.0.0.0:9222</code>）。
+      <code>normalizeCdpWsUrl()</code> 负责将这些地址重写为外部可达的地址：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/browser/cdp.ts — normalizeCdpWsUrl</span>
+      </div>
+      <pre><code class="language-typescript">export function normalizeCdpWsUrl(wsUrl: string, cdpUrl: string): string {
+  const ws = new URL(wsUrl);
+  const cdp = new URL(cdpUrl);
+  // 0.0.0.0 和 [::] 是通配绑定地址，需要重写为外部 host:port
+  const isWildcardBind = ws.hostname === "0.0.0.0" || ws.hostname === "[::]";
+  if ((isLoopbackHost(ws.hostname) || isWildcardBind) && !isLoopbackHost(cdp.hostname)) {
+    ws.hostname = cdp.hostname;
+    ws.port = cdp.port || (cdp.protocol === "https:" ? "443" : "80");
+    ws.protocol = cdp.protocol === "https:" ? "wss:" : "ws:";
+  }
+  // 继承 cdp URL 的认证信息和查询参数
+  if (!ws.username && (cdp.username || cdp.password)) {
+    ws.username = cdp.username;
+    ws.password = cdp.password;
+  }
+  return ws.toString();
+}</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PROFILES ==================== -->
+  <section id="profiles" class="animate-in delay-2">
+    <h2>Browser Profiles</h2>
+
+    <p>
+      OpenClaw 支持<strong>多个浏览器 Profile</strong> 并行运行，每个 Profile 对应一个独立的 CDP 端点。
+      Profile 不是 Chrome User Profile——它是 OpenClaw 的<strong>路由配置</strong>，决定浏览器命令发往哪个 CDP 端点。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Profile 模式</th>
+            <th>Driver</th>
+            <th>说明</th>
+            <th>典型场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>openclaw</td>
+            <td><span class="num">openclaw</span></td>
+            <td>OpenClaw 管理的独立 Chromium 实例（自动启停）</td>
+            <td>自动化测试、数据采集、隔离浏览</td>
+          </tr>
+          <tr>
+            <td>chrome</td>
+            <td><span class="num">extension</span></td>
+            <td>通过 Chrome Extension Relay 接管用户现有 Chrome 标签页</td>
+            <td>操作已登录的网站、实时协作</td>
+          </tr>
+          <tr>
+            <td>remote / custom</td>
+            <td><span class="num">openclaw</span></td>
+            <td>连接远程 CDP 端点（如 Browserless、Docker 沙箱浏览器）</td>
+            <td>无头浏览器服务、Sandbox 模式</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Profile 配置解析</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/browser/config.ts — resolveProfile</span>
+      </div>
+      <pre><code class="language-typescript">export type ResolvedBrowserProfile = {
+  name: string;
+  cdpPort: number;          // CDP 端口
+  cdpUrl: string;           // 完整 CDP URL
+  cdpHost: string;          // CDP 主机名
+  cdpIsLoopback: boolean;   // 是否本地回环
+  color: string;            // UI 标识颜色（如工具栏徽章颜色）
+  driver: "openclaw" | "extension";  // 驱动模式
+  attachOnly: boolean;      // 仅连接（不自动启动浏览器）
+};</code></pre>
+    </div>
+
+    <h3>CDP 端口分配</h3>
+
+    <p>
+      每个 Profile 分配独立的 CDP 端口。默认端口范围是 <strong>18800-18899</strong>（支持 100 个 Profile），
+      通过 <code>allocateCdpPort()</code> 从未使用的端口中分配。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">端口分配布局</div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--ink-tertiary);">18789</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-session">GW</div>
+        </div>
+        <span class="lane-info">Gateway WebSocket 端口</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--ink-tertiary);">18790</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-main">Bridge</div>
+        </div>
+        <span class="lane-info">Bridge 服务端口</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--ink-tertiary);">18791</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-cron">Ctrl</div>
+        </div>
+        <span class="lane-info">Browser Control Server</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-4);">18800-18899</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-subagent">P1</div>
+          <div class="lane-slot lane-slot-subagent">P2</div>
+          <div class="lane-slot lane-slot-subagent">P3</div>
+          <div class="lane-slot lane-slot-subagent" style="background: transparent; border: 2px dashed var(--border-strong); color: var(--ink-faint);">...</div>
+        </div>
+        <span class="lane-info">CDP 端口范围（每 Profile 一个）</span>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        内置 Profile 自动创建
+      </div>
+      <p>即使用户未配置任何 Profile，OpenClaw 也会自动创建两个内置 Profile：</p>
+      <p><strong>openclaw</strong> — OpenClaw 管理的 Chromium 实例（分配第一个可用 CDP 端口）</p>
+      <p><strong>chrome</strong> — Chrome Extension Relay 端点（controlPort + 1，driver 设为 extension）</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SNAPSHOT ==================== -->
+  <section id="snapshot">
+    <h2>Snapshot 系统</h2>
+
+    <p>
+      浏览器自动化的核心挑战是：<strong>Agent 如何"看到"网页？</strong>
+      截图是一种方式，但截图占用大量 token 且难以精确定位元素。
+      OpenClaw 提供了两种文本化的页面快照机制，让 Agent 以极低的 token 成本"理解"页面结构。
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-2);">AI Snapshot</h4>
+        <p>
+          基于 Playwright 的 <code>_snapshotForAI()</code> 接口。返回 AI 友好的页面结构文本，
+          包含可交互元素的 <strong>aria-ref</strong> ID。Agent 可直接使用这些 ref 进行操作。
+        </p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">Role Snapshot</h4>
+        <p>
+          基于 Playwright 的 <code>ariaSnapshot()</code> 或 CDP 的 <code>Accessibility.getFullAXTree</code>。
+          解析 ARIA 角色树，为每个可交互元素生成 <strong>e1/e2/e3...</strong> 引用 ID。
+        </p>
+      </div>
+    </div>
+
+    <h3>AI Snapshot 工作流</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/browser/pw-tools-core.snapshot.ts — snapshotAiViaPlaywright</span>
+      </div>
+      <pre><code class="language-typescript">export async function snapshotAiViaPlaywright(opts) {
+  const page = await getPageForTargetId({ cdpUrl, targetId });
+  ensurePageState(page);
+
+  // 调用 Playwright 内置的 AI Snapshot 接口
+  const result = await page._snapshotForAI({
+    timeout: Math.max(500, Math.min(60_000, opts.timeoutMs ?? 5000)),
+    track: "response",
+  });
+  let snapshot = String(result?.full ?? "");
+
+  // 可选截断（防止超大页面溢出 token 预算）
+  if (limit && snapshot.length > limit) {
+    snapshot = `${snapshot.slice(0, limit)}\n\n[...TRUNCATED - page too large]`;
+  }
+
+  // 从 AI Snapshot 文本中提取 ref 映射
+  const built = buildRoleSnapshotFromAiSnapshot(snapshot);
+  storeRoleRefsForTarget({ page, cdpUrl, targetId, refs: built.refs, mode: "aria" });
+  return { snapshot, refs: built.refs };
+}</code></pre>
+    </div>
+
+    <h3>Role Snapshot 角色分类</h3>
+
+    <p>
+      Role Snapshot 将页面 DOM 按 <strong>ARIA Role</strong> 分类，并为可交互元素分配 ref ID：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>角色类别</th>
+            <th>包含的 Role</th>
+            <th>是否分配 Ref</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">Interactive（可交互）</td>
+            <td>button, link, textbox, checkbox, radio, combobox, listbox, menuitem, slider, switch, tab ...</td>
+            <td style="color:var(--accent-3);font-weight:600;">分配 ref（如 e1, e2）</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">Content（内容）</td>
+            <td>heading, cell, listitem, article, region, main, navigation ...</td>
+            <td style="color:var(--accent-3);font-weight:600;">分配 ref</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">Structural（结构）</td>
+            <td>generic, group, list, table, row, menu, toolbar, tablist, tree ...</td>
+            <td style="color:var(--accent);font-weight:600;">不分配 ref（节省 token）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/browser/pw-role-snapshot.ts — RoleRef 类型</span>
+      </div>
+      <pre><code class="language-typescript">export type RoleRef = {
+  role: string;       // ARIA 角色（如 "button", "link"）
+  name?: string;      // 可访问名称（如按钮文本）
+  nth?: number;       // 同名元素的序号（用于消歧）
+};
+
+export type RoleRefMap = Record&lt;string, RoleRef&gt;;
+// 示例: { "e1": { role: "button", name: "Submit" },
+//         "e2": { role: "textbox", name: "Email" } }</code></pre>
+    </div>
+
+    <h3>两种 Refs 模式</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>模式</th>
+            <th>来源</th>
+            <th>定位方式</th>
+            <th>稳定性</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>role（默认）</td>
+            <td>ariaSnapshot 解析</td>
+            <td><code>getByRole(role, { name })</code></td>
+            <td>基于角色+名称定位，中等稳定</td>
+          </tr>
+          <tr>
+            <td>aria</td>
+            <td>_snapshotForAI 返回</td>
+            <td><code>aria-ref=...</code> 选择器</td>
+            <td>Playwright 内部 ID，跨调用自我解析更稳定</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">生活类比</div>
+      <p>
+        把 Snapshot 想象成<strong>网页的文字描述</strong>：
+        你给一个看不见网页的朋友描述"这个页面有一个标题'登录'，一个邮箱输入框（e1），
+        一个密码输入框（e2），和一个'提交'按钮（e3）"。
+        朋友（Agent）就可以说"请在 e1 里输入我的邮箱"。
+        这比发送一张截图给 Agent 看要高效得多。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: EXTENSION RELAY ==================== -->
+  <section id="extension-relay">
+    <h2>Chrome Extension Relay</h2>
+
+    <p>
+      <code>profile="chrome"</code> 模式通过 <strong>Chrome Extension Relay</strong> 让 Agent 接管用户<strong>已有的 Chrome 标签页</strong>。
+      这是一种独特的"非侵入式"浏览器自动化——Agent 操作的是用户已经登录、已经打开的真实网页。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">Chrome Extension Relay 架构</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>Chrome Extension（前端）</strong><br>
+          <span style="font-size:0.8rem;">用户点击工具栏图标 attach 标签页。通过 chrome.debugger API 获取 CDP 访问。</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">WebSocket 连接（带认证 token）</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>Extension Relay Server（后端）</strong><br>
+          <span style="font-size:0.8rem;">OpenClaw 本地 WebSocket 服务器，转发 CDP 命令/事件</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">CDP 命令桥接</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>Playwright / CDP Client</strong><br>
+          <span style="font-size:0.8rem;">OpenClaw 的自动化引擎，通过 Relay 操控 Chrome 标签页</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>Relay 通信协议</h3>
+
+    <p>Extension Relay Server 作为 CDP 代理工作，将外部 CDP 命令转发为 Chrome Extension 的 <code>forwardCDPCommand</code> 消息：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/browser/extension-relay.ts — 消息类型</span>
+      </div>
+      <pre><code class="language-typescript">// 外部 CDP 客户端 → Relay → Extension
+type ExtensionForwardCommandMessage = {
+  id: number;
+  method: "forwardCDPCommand";
+  params: { method: string; params?: unknown; sessionId?: string };
+};
+
+// Extension → Relay → 外部 CDP 客户端
+type ExtensionForwardEventMessage = {
+  method: "forwardCDPEvent";
+  params: { method: string; params?: unknown; sessionId?: string };
+};
+
+// Extension → Relay（响应）
+type ExtensionResponseMessage = {
+  id: number;
+  result?: unknown;
+  error?: string;
+};</code></pre>
+    </div>
+
+    <h3>Relay 安全认证</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>安全措施</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Token 认证</td>
+            <td>Extension 和 Relay 共享认证 token，防止未授权连接</td>
+          </tr>
+          <tr>
+            <td>Loopback 绑定</td>
+            <td>Relay 默认绑定在 127.0.0.1，仅接受本地连接</td>
+          </tr>
+          <tr>
+            <td>用户主动 Attach</td>
+            <td>用户必须主动点击工具栏图标 attach 标签页，Agent 无法擅自接管</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        过期 Target 处理
+      </div>
+      <p>Chrome Extension Relay 模式下，标签页可能在两次 Agent 调用之间被用户关闭。当 Relay 返回 <code>404: tab not found</code> 时，Browser Tool 会自动降级——移除 targetId 参数，使用当前活动标签页重试。这确保了 Agent 不会因为过期的 targetId 而卡住。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: WAIT ==================== -->
+  <section id="wait">
+    <h2>Wait 等待机制</h2>
+
+    <p>
+      浏览器自动化中，<strong>等待</strong>是最重要的可靠性保障。页面加载、AJAX 请求、动画过渡——
+      都需要 Agent 在操作前确认页面已就绪。OpenClaw 通过 <code>act:wait</code> 动作提供 4 种等待条件：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>等待条件</th>
+            <th>参数</th>
+            <th>说明</th>
+            <th>使用场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">元素选择器</td>
+            <td><code>selector</code></td>
+            <td>等待指定 CSS 选择器的元素出现在页面中</td>
+            <td>等待特定组件渲染完毕</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">文本消失</td>
+            <td><code>textGone</code></td>
+            <td>等待指定文本从页面中消失</td>
+            <td>等待 loading 提示消失</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">URL 匹配</td>
+            <td><code>url</code></td>
+            <td>等待页面 URL 匹配指定模式</td>
+            <td>等待导航完成（如登录后跳转）</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">加载状态</td>
+            <td><code>loadState</code></td>
+            <td>等待页面达到指定加载状态</td>
+            <td>load / domcontentloaded / networkidle</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        设计理念
+      </div>
+      <p>OpenClaw 的 Browser Tool 描述中明确指出：<strong>"Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists."</strong></p>
+      <p>推荐的做法是使用 <code>snapshot</code> 观察页面状态，然后基于 snapshot 中的 ref 进行操作。Snapshot 本身已经隐式等待了页面就绪。只在没有可靠 UI 状态指标时，才使用显式的 wait。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: TOOL INTEGRATION ==================== -->
+  <section id="tool-integration">
+    <h2>与 Tool 系统集成</h2>
+
+    <p>
+      Browser 自动化通过 <code>createBrowserTool()</code> 注册为一个 <strong>Agent Tool</strong>，
+      名称为 <code>browser</code>，遵循与其他工具相同的 Policy 过滤和 Hook 机制。
+    </p>
+
+    <h3>Tool 参数路由</h3>
+
+    <p><code>browser</code> tool 接受一个 <code>action</code> 参数，路由到不同的操作：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Action</th>
+            <th>功能</th>
+            <th>关键参数</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>status</td>
+            <td>查看浏览器状态</td>
+            <td>profile</td>
+          </tr>
+          <tr>
+            <td>start / stop</td>
+            <td>启动 / 停止浏览器</td>
+            <td>profile</td>
+          </tr>
+          <tr>
+            <td>profiles</td>
+            <td>列出可用 Profile</td>
+            <td>无</td>
+          </tr>
+          <tr>
+            <td>tabs</td>
+            <td>列出已打开的标签页</td>
+            <td>profile</td>
+          </tr>
+          <tr>
+            <td>open</td>
+            <td>打开新标签页</td>
+            <td>targetUrl, profile</td>
+          </tr>
+          <tr>
+            <td>snapshot</td>
+            <td>获取页面快照（AI / Role）</td>
+            <td>targetId, refs(role/aria)</td>
+          </tr>
+          <tr>
+            <td>screenshot</td>
+            <td>截取页面截图</td>
+            <td>targetId, fullPage, ref, element</td>
+          </tr>
+          <tr>
+            <td>act</td>
+            <td>执行交互动作（点击/输入/滚动/等待）</td>
+            <td>request: { kind, ref, text, ... }</td>
+          </tr>
+          <tr>
+            <td>navigate</td>
+            <td>导航到指定 URL</td>
+            <td>targetUrl, targetId</td>
+          </tr>
+          <tr>
+            <td>console</td>
+            <td>获取浏览器控制台日志</td>
+            <td>targetId</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>三种 Target 模式</h3>
+
+    <p>Browser Tool 的 <code>target</code> 参数控制浏览器命令发往哪个执行环境：</p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">sandbox</h4>
+        <p>发往 Docker Sandbox 内的浏览器容器。通过 <code>sandboxBridgeUrl</code> 连接。需要 <code>agents.defaults.sandbox.browser.enabled=true</code>。</p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-2);">host</h4>
+        <p>发往宿主机上的 Browser Control Server。默认模式（无 sandbox 时）。Chrome Extension Relay 模式自动使用此 target。</p>
+      </div>
+    </div>
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good" style="grid-column: 1 / -1;">
+        <h4 style="color: var(--accent-4);">node</h4>
+        <p>发往远程 Node（通过 Gateway 的 <code>node.invoke</code> + <code>browser.proxy</code> 命令）。当 <code>gateway.nodes.browser.mode=auto</code> 且有 browser-capable node 连接时，可自动路由。</p>
+      </div>
+    </div>
+
+    <h3>Sandbox 浏览器集成</h3>
+
+    <p>当 Sandbox 启用浏览器支持时，OpenClaw 会创建一个<strong>独立的 Docker 容器</strong>运行 Chromium（使用 <code>openclaw-sandbox-browser:bookworm-slim</code> 镜像），并通过 Bridge Server 桥接：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/sandbox/types.ts — SandboxBrowserContext</span>
+      </div>
+      <pre><code class="language-typescript">export type SandboxBrowserContext = {
+  bridgeUrl: string;       // Bridge HTTP API URL（宿主机可达）
+  noVncUrl?: string;       // noVNC 观察 URL（可选）
+  containerName: string;   // Docker 容器名
+};
+
+// Browser 容器与 Sandbox 容器分开运行
+// Browser 容器有独立网络（openclaw-sandbox-browser）
+// 以支持 Chrome 的网络访问需求</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        网络隔离区别
+      </div>
+      <p>Sandbox 主容器默认 <code>network=none</code>（完全隔离），但 Browser 容器使用独立的 <code>openclaw-sandbox-browser</code> 网络——因为浏览器需要网络访问才能加载网页。两个容器的安全边界完全独立。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source">
+    <h2>源码索引</h2>
+
+    <p>以下是 Browser 自动化系统涉及的关键源文件：</p>
+
+    <h3>Agent Tool 层</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="word-break:break-all;">src/agents/tools/browser-tool.ts</td>
+            <td>Browser Tool 入口（action 路由）</td>
+            <td><code>createBrowserTool</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/agents/tools/browser-tool.actions.ts</td>
+            <td>复杂 Action 实现（snapshot/act/tabs/console）</td>
+            <td><code>executeSnapshotAction</code>, <code>executeActAction</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/agents/tools/browser-tool.schema.ts</td>
+            <td>Tool 参数 JSON Schema 定义</td>
+            <td><code>BrowserToolSchema</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Browser Core 层</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="word-break:break-all;">src/browser/config.ts</td>
+            <td>Browser 配置解析</td>
+            <td><code>resolveBrowserConfig</code>, <code>resolveProfile</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/profiles.ts</td>
+            <td>CDP 端口分配</td>
+            <td><code>allocateCdpPort</code>, <code>getUsedPorts</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/cdp.ts</td>
+            <td>CDP 协议底层操作</td>
+            <td><code>normalizeCdpWsUrl</code>, <code>captureScreenshot</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/pw-session.ts</td>
+            <td>Playwright 连接与页面管理</td>
+            <td><code>getPageForTargetId</code>, <code>ensurePageState</code>, <code>listPagesViaPlaywright</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/pw-ai.ts</td>
+            <td>Playwright AI 模块入口</td>
+            <td><code>snapshotAiViaPlaywright</code>, <code>clickViaPlaywright</code>, ...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Snapshot 层</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="word-break:break-all;">src/browser/pw-tools-core.snapshot.ts</td>
+            <td>Snapshot 实现（AI / Role / Aria）</td>
+            <td><code>snapshotAiViaPlaywright</code>, <code>snapshotRoleViaPlaywright</code>, <code>snapshotAriaViaPlaywright</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/pw-role-snapshot.ts</td>
+            <td>Role 快照解析与 Ref 生成</td>
+            <td><code>buildRoleSnapshotFromAriaSnapshot</code>, <code>RoleRef</code>, <code>RoleRefMap</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Extension Relay 层</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="word-break:break-all;">src/browser/extension-relay.ts</td>
+            <td>Extension Relay WebSocket 服务器</td>
+            <td>CDP 命令转发、事件桥接</td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/extension-relay-auth.ts</td>
+            <td>Relay 认证与 Token 管理</td>
+            <td><code>resolveRelayAuthTokenForPort</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/control-service.ts</td>
+            <td>Browser Control HTTP Server</td>
+            <td>HTTP API 路由</td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/navigation-guard.ts</td>
+            <td>导航安全防护（SSRF 防护）</td>
+            <td><code>assertBrowserNavigationAllowed</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Sandbox Browser 层</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="word-break:break-all;">src/agents/sandbox/browser.ts</td>
+            <td>Sandbox 浏览器容器管理</td>
+            <td>ensureSandboxBrowser, waitForSandboxCdp</td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/agents/sandbox/browser-bridges.ts</td>
+            <td>Sandbox Bridge Server 注册</td>
+            <td><code>BROWSER_BRIDGES</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/browser/bridge-server.ts</td>
+            <td>Bridge HTTP Server（Sandbox 用）</td>
+            <td><code>startBrowserBridgeServer</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="doc-footer">
+    <p>
+      OpenClaw Architecture Deep Dive &middot;
+      <a href="../index.html">返回总览</a>
+    </p>
+  </footer>
+
+</main>
+
+<script>
+  // Syntax highlighting
+  hljs.highlightAll();
+
+  // Scroll progress bar
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // TOC active state tracking
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) {
+        currentId = section.id;
+      }
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  // Animate-in on scroll (intersection observer)
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>

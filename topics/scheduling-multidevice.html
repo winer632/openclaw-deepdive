@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>调度与多设备：Cron / Heartbeat / Node Registry — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的调度系统：Cron 定时任务、Heartbeat 心跳机制、Node Registry 多设备管理、APNs 推送唤醒">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#overview">调度全景：三层时间引擎</a>
+  <a href="#cron">Cron 定时任务系统</a>
+  <a href="#heartbeat">Heartbeat 心跳机制</a>
+  <a href="#lane-integration">调度与 Lane Queue 协作</a>
+  <a href="#node-registry">Node Registry 多设备管理</a>
+  <a href="#device-pairing">设备配对流程</a>
+  <a href="#apns">APNs 推送唤醒</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>调度与多设备<br>Cron / Heartbeat / Node Registry</h1>
+    <p class="doc-hero-subtitle">
+      单进程网关内的三层时间引擎：Cron 定时任务以 croner 表达式驱动自治工作流，Heartbeat 按可配置间隔巡检 Agent 状态，
+      Node Registry 管理多设备连接并通过 APNs 静默推送唤醒离线移动端。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/cron/ &middot; src/infra/heartbeat-runner.ts &middot; src/gateway/node-registry.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: OVERVIEW ==================== -->
+  <section id="overview" class="animate-in delay-1">
+    <h2>调度全景：三层时间引擎</h2>
+
+    <p>
+      OpenClaw 在单进程 Gateway 内部实现了三套互不依赖但可以协作的调度机制。
+      它们覆盖了从 "每 30 秒执行一次" 到 "每天凌晨 3 点跑一次" 的全部时间粒度。
+    </p>
+
+    <div class="flow-container">
+      <div class="flow-node flow-node-main">
+        <strong>Cron Service</strong><br>
+        用户定义的定时任务<br>
+        croner 表达式 / every / at
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <div class="flow-arrow-label">触发 Agent 运行</div>
+      </div>
+      <div class="flow-node flow-node-exec">
+        <strong>Lane Queue</strong><br>
+        CommandLane.Cron<br>
+        并发隔离执行
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <div class="flow-arrow-label">结果投递</div>
+      </div>
+      <div class="flow-node flow-node-session">
+        <strong>Channel 投递</strong><br>
+        Telegram / Discord / Slack<br>
+        多通道交付结果
+      </div>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>调度层</th><th>触发方式</th><th>用途</th><th>所在文件</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Cron Service</strong></td>
+            <td>croner 表达式 / <code>every</code> 间隔 / <code>at</code> 一次性</td>
+            <td>自治工作流：每日摘要、定时报告、数据同步</td>
+            <td><code>src/cron/service/</code></td>
+          </tr>
+          <tr>
+            <td><strong>Heartbeat Runner</strong></td>
+            <td>可配置间隔（默认 30m），支持 <code>parseDurationMs</code></td>
+            <td>Agent 状态巡检、HEARTBEAT.md 变更检测、系统事件投递</td>
+            <td><code>src/infra/heartbeat-runner.ts</code></td>
+          </tr>
+          <tr>
+            <td><strong>Node Wake / APNs</strong></td>
+            <td>按需唤醒（invoke 时离线设备不在线）</td>
+            <td>唤醒 iOS/macOS 设备上的 native app，使其重新连接 Gateway</td>
+            <td><code>src/infra/push-apns.ts</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        把 Gateway 想象成一栋大厦的物业管理中心。<strong>Cron Service</strong> 是预设好的工作排班表（"每天 8 点浇花"），
+        <strong>Heartbeat</strong> 是安保人员每 30 分钟巡逻一次的时钟，
+        <strong>APNs Push Wake</strong> 则是对讲机——当需要某个保安时，即使他在休息室也能被呼叫回来。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: CRON ==================== -->
+  <section id="cron" class="animate-in delay-2">
+    <h2>Cron 定时任务系统</h2>
+
+    <p>
+      OpenClaw 的 Cron 系统是一个完整的 in-process 定时任务引擎。它支持三种调度模式，
+      用户通过 YAML 配置或 Gateway API 创建任务后，系统会在指定时间自动触发 Agent 运行。
+    </p>
+
+    <h3>三种调度模式</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>模式</th><th>schedule.kind</th><th>配置示例</th><th>行为</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Cron 表达式</strong></td>
+            <td><code>"cron"</code></td>
+            <td><code>expr: "0 8 * * 1-5"</code></td>
+            <td>标准 5/6 字段 cron 表达式，通过 croner 库解析，支持时区 <code>tz</code></td>
+          </tr>
+          <tr>
+            <td><strong>固定间隔</strong></td>
+            <td><code>"every"</code></td>
+            <td><code>everyMs: 3600000</code></td>
+            <td>基于 <code>anchorMs</code> 锚点的等间隔触发，自动计算 <code>nextRunAtMs</code></td>
+          </tr>
+          <tr>
+            <td><strong>一次性</strong></td>
+            <td><code>"at"</code></td>
+            <td><code>at: "2026-03-14T09:00:00Z"</code></td>
+            <td>到达指定时间后执行一次，执行后自动禁用或删除</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>核心调度逻辑</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/cron/schedule.ts</span>
+      </div>
+      <pre><code class="language-typescript">// computeNextRunAtMs — 统一计算下次执行时间
+export function computeNextRunAtMs(
+  schedule: CronSchedule,
+  nowMs: number
+): number | undefined {
+  if (schedule.kind === "at") {
+    // 一次性任务：时间未过则返回，否则 undefined
+    const atMs = parseAbsoluteTimeMs(sched.at);
+    return atMs > nowMs ? atMs : undefined;
+  }
+  if (schedule.kind === "every") {
+    // 固定间隔：基于 anchorMs 对齐
+    const elapsed = nowMs - anchor;
+    const steps = Math.ceil(elapsed / everyMs);
+    return anchor + steps * everyMs;
+  }
+  // cron 表达式：委托 croner 库计算
+  const cron = resolveCachedCron(expr, timezone);
+  return cron.nextRun(new Date(nowMs))?.getTime();
+}</code></pre>
+    </div>
+
+    <h3>Timer 驱动与安全机制</h3>
+
+    <p>
+      Cron Service 使用 <strong>单一 setTimeout</strong> 定时器（而非 setInterval）来驱动任务执行。
+      每次任务完成或配置变更后，系统会重新计算所有任务的 <code>nextRunAtMs</code>，
+      找到最近的触发时间并用 <code>armTimer</code> 设置下一个唤醒点。
+    </p>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        安全边界
+      </div>
+      <p><strong>MIN_REFIRE_GAP_MS = 2,000ms</strong>：防止 <code>computeJobNextRunAtMs</code> 返回同秒时间导致无限重触发循环（Issue #17821）。</p>
+      <p><strong>MAX_TIMER_DELAY_MS = 60,000ms</strong>：即使下个任务在 1 小时后，定时器也最多 sleep 60 秒后重新校准，确保配置热重载能及时生效。</p>
+      <p><strong>Restart Catchup</strong>：Gateway 重启时扫描被中断的任务（<code>runningAtMs</code> 残留标记），清除后执行错过的任务。</p>
+    </div>
+
+    <h3>执行与投递流程</h3>
+
+    <div class="flow-container">
+      <div class="flow-node flow-node-main">
+        <strong>armTimer</strong><br>
+        计算最近 nextRunAtMs<br>
+        setTimeout 唤醒
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <div class="flow-arrow-label">到时触发</div>
+      </div>
+      <div class="flow-node flow-node-exec">
+        <strong>wake()</strong><br>
+        遍历所有 due 任务<br>
+        enqueueCommandInLane(Cron)
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <div class="flow-arrow-label">isolated-agent</div>
+      </div>
+      <div class="flow-node flow-node-session">
+        <strong>Delivery</strong><br>
+        结果推送到<br>
+        Telegram / Discord / Slack
+      </div>
+    </div>
+
+    <p>
+      每个 Cron 任务执行时生成独立的 session key：<code>agent:{agentId}:cron:{jobId}:run:{runId}</code>，
+      确保 Cron 任务之间、以及 Cron 与用户对话之间的会话上下文完全隔离。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: HEARTBEAT ==================== -->
+  <section id="heartbeat" class="animate-in delay-1">
+    <h2>Heartbeat 心跳机制</h2>
+
+    <p>
+      Heartbeat 是 OpenClaw 的 "自主巡检" 系统。与 Cron 不同的是，Heartbeat 不是用户定义的任务，
+      而是系统内置的 Agent 自检机制——定期让 Agent 审视自己的工作空间，发现变化后主动向用户推送消息。
+    </p>
+
+    <h3>运作原理</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/infra/heartbeat-runner.ts</span>
+      </div>
+      <pre><code class="language-typescript">// HeartbeatRunner — 多 Agent 心跳调度器
+export function startHeartbeatRunner(opts) {
+  // 1. 为每个配置了 heartbeat 的 Agent 创建状态
+  const agents = resolveHeartbeatAgents(cfg);
+  // 2. 计算各 Agent 的 intervalMs
+  //    默认 DEFAULT_HEARTBEAT_EVERY = "30m"
+  // 3. 单一 setTimeout 驱动，到期后触发 requestHeartbeatNow
+  // 4. 运行时：
+  //    - 检查 Main Lane 是否空闲（queueSize === 0）
+  //    - 检查是否在 activeHours 范围内
+  //    - 读取 HEARTBEAT.md 判断是否有内容
+  //    - 调用 getReplyFromConfig 让 Agent 生成回复
+  //    - 用 HEARTBEAT_TOKEN 判断是否需要真正投递
+}</code></pre>
+    </div>
+
+    <h3>心跳决策流程</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>检查项</th><th>条件</th><th>结果</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>是否启用</td>
+            <td><code>areHeartbeatsEnabled()</code> 返回 false</td>
+            <td>跳过，返回 <code>skipped: disabled</code></td>
+          </tr>
+          <tr>
+            <td>活跃时间</td>
+            <td>不在 <code>activeHours</code> 范围内</td>
+            <td>跳过，返回 <code>skipped: quiet-hours</code></td>
+          </tr>
+          <tr>
+            <td>主车道繁忙</td>
+            <td><code>getQueueSize(Main) > 0</code></td>
+            <td>跳过，返回 <code>skipped: requests-in-flight</code></td>
+          </tr>
+          <tr>
+            <td>HEARTBEAT.md 空</td>
+            <td>文件存在但内容为空</td>
+            <td>跳过，返回 <code>skipped: empty-heartbeat-file</code></td>
+          </tr>
+          <tr>
+            <td>Agent 回复为 HEARTBEAT_TOKEN</td>
+            <td>"一切正常" 信号</td>
+            <td>可选发送 ok 确认，修剪转录记录</td>
+          </tr>
+          <tr>
+            <td>回复与上次相同</td>
+            <td>24h 内重复内容</td>
+            <td>去重跳过，防止 "唠叨" 行为</td>
+          </tr>
+          <tr>
+            <td>有实质内容</td>
+            <td>非 token、非重复</td>
+            <td>通过 <code>deliverOutboundPayloads</code> 投递到目标通道</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        设计洞察
+      </div>
+      <p>
+        Heartbeat 的精妙之处在于它的 <strong>"零噪声"</strong> 设计。Agent 每次心跳运行时都会读取 HEARTBEAT.md 并生成回复，
+        但只有当回复包含真正有价值的信息时（非 HEARTBEAT_TOKEN）才会向用户推送。
+        同时，ok 运行产生的转录记录会被 <code>pruneHeartbeatTranscript()</code> 剪除，
+        防止 "一切正常" 的空转对话历史膨胀。
+      </p>
+    </div>
+
+    <h3>Heartbeat 与 Cron 事件联动</h3>
+
+    <p>
+      Heartbeat 不仅是定时巡检，还充当 <strong>系统事件中继站</strong>。
+      当 Cron 任务执行完成或 exec 命令完成时，系统会写入 system event entry，
+      Heartbeat 的 preflight 阶段会检测这些事件并构造专用 prompt：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/infra/heartbeat-runner.ts — resolveHeartbeatRunPrompt</span>
+      </div>
+      <pre><code class="language-typescript">// Heartbeat 根据事件类型选择不同的 prompt 模板
+const basePrompt = hasExecCompletion
+  ? buildExecEventPrompt({ deliverToUser: canRelayToUser })
+  : hasCronEvents
+    ? buildCronEventPrompt(cronEvents, { deliverToUser: canRelayToUser })
+    : resolveHeartbeatPrompt(cfg, heartbeat);</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: LANE INTEGRATION ==================== -->
+  <section id="lane-integration" class="animate-in delay-2">
+    <h2>调度与 Lane Queue 协作</h2>
+
+    <p>
+      调度系统产生的任务不会直接执行，而是通过 <strong>Lane Queue</strong> 进行并发控制。
+      每种调度任务使用独立的 Lane，确保不同类型的任务之间互不阻塞。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/process/lanes.ts + src/gateway/server-lanes.ts</span>
+      </div>
+      <pre><code class="language-typescript">// 四条预定义车道
+export const enum CommandLane {
+  Main     = "main",      // 用户消息处理
+  Cron     = "cron",      // Cron 定时任务
+  Subagent = "subagent",  // 子 Agent 委托任务
+  Nested   = "nested",    // 嵌套 Agent 调用
+}
+
+// Gateway 启动时设置各车道并发度
+export function applyGatewayLaneConcurrency(cfg) {
+  setCommandLaneConcurrency(CommandLane.Cron, cfg.cron?.maxConcurrentRuns ?? 1);
+  setCommandLaneConcurrency(CommandLane.Main, resolveAgentMaxConcurrent(cfg));
+  setCommandLaneConcurrency(CommandLane.Subagent, resolveSubagentMaxConcurrent(cfg));
+}</code></pre>
+    </div>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4>Cron Lane（默认并发 1）</h4>
+        <p>Cron 任务默认串行执行，防止多个定时任务同时操作共享资源。可通过 <code>cron.maxConcurrentRuns</code> 调大。</p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4>Main Lane（可配置并发）</h4>
+        <p>用户消息走 Main Lane。Heartbeat 在执行前会检查 <code>getQueueSize(Main) > 0</code>，主动让路给用户请求。</p>
+      </div>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        Lane 切换规则
+      </div>
+      <p>嵌套 Agent 不继承 Cron Lane。<code>resolveNestedAgentLane()</code> 明确规定：当父任务在 <code>cron</code> Lane 时，
+      子任务切换到 <code>nested</code> Lane，避免 Cron 任务的串行限制阻塞内部的 Agent 调用链。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: NODE REGISTRY ==================== -->
+  <section id="node-registry" class="animate-in delay-1">
+    <h2>Node Registry 多设备管理</h2>
+
+    <p>
+      OpenClaw 支持多个 "Node" 同时连接到同一个 Gateway。每个 Node 代表一个客户端设备——
+      可以是 macOS 桌面应用、iOS 移动端、Android 客户端，甚至是另一台服务器上的 CLI。
+      <code>NodeRegistry</code> 负责管理这些设备的注册、能力发现和远程调用。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/gateway/node-registry.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type NodeSession = {
+  nodeId: string;          // 设备唯一标识
+  connId: string;          // WebSocket 连接 ID
+  client: GatewayWsClient; // WebSocket 客户端引用
+  displayName?: string;    // 用户可读名称
+  platform?: string;       // darwin / ios / android / linux / win32
+  version?: string;        // 客户端版本号
+  deviceFamily?: string;   // iPhone / iPad / Mac / Android
+  modelIdentifier?: string;// 如 "iPhone15,4"
+  caps: string[];          // 能力列表：["canvas", "exec", "tts"]
+  commands: string[];      // 支持的远程命令列表
+  connectedAtMs: number;   // 连接时间戳
+};
+
+export class NodeRegistry {
+  private nodesById = new Map&lt;string, NodeSession&gt;();
+  private nodesByConn = new Map&lt;string, string&gt;();
+  private pendingInvokes = new Map&lt;string, PendingInvoke&gt;();
+
+  register(client, opts) { /* 注册新设备 */ }
+  unregister(connId) { /* 注销并清理 pending invokes */ }
+  listConnected(): NodeSession[] { /* 列出在线设备 */ }
+  invoke(params): Promise&lt;NodeInvokeResult&gt; { /* 远程调用 */ }
+}</code></pre>
+    </div>
+
+    <h3>远程调用机制</h3>
+
+    <p>
+      Gateway 可以通过 <code>NodeRegistry.invoke()</code> 向任意已连接的 Node 发送命令。
+      这是一个基于 WebSocket 的 RPC 机制：Gateway 发送 <code>node.invoke.request</code> 事件，
+      Node 执行后返回 <code>node.invoke.result</code>。整个过程有超时保护（默认 30 秒）。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">Node Remote Invoke 时序</div>
+      <pre>
+Gateway                          Node (iOS/macOS)
+   |                                  |
+   |--- node.invoke.request --------->|
+   |    { id, command, paramsJSON }   |
+   |                                  |--- 执行命令
+   |                                  |
+   |<-- node.invoke.result -----------|
+   |    { id, ok, payloadJSON }       |
+   |                                  |
+   |--- [超时 30s] ------------------>|
+   |    resolve({ ok: false,          |
+   |      code: "TIMEOUT" })          |
+      </pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: DEVICE PAIRING ==================== -->
+  <section id="device-pairing" class="animate-in delay-2">
+    <h2>设备配对流程</h2>
+
+    <p>
+      新设备连接 Gateway 前需要经过 <strong>配对（Pairing）</strong> 流程。
+      OpenClaw 实现了基于 HMAC 签名的设备认证协议，支持 v2 和 v3 两个版本的认证载荷格式。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/gateway/device-auth.ts</span>
+      </div>
+      <pre><code class="language-typescript">// V3 认证载荷格式（含平台和设备族信息）
+export function buildDeviceAuthPayloadV3(params): string {
+  return [
+    "v3",                       // 版本标识
+    params.deviceId,            // 设备 ID
+    params.clientId,            // 客户端 ID
+    params.clientMode,          // 连接模式
+    params.role,                // 角色（viewer/editor/admin）
+    params.scopes.join(","),    // 授权范围
+    String(params.signedAtMs),  // 签名时间戳
+    params.token ?? "",         // 认证 token
+    params.nonce,               // 防重放 nonce
+    platform,                   // darwin / ios / android
+    deviceFamily,               // iPhone / Mac / Android
+  ].join("|");
+}</code></pre>
+    </div>
+
+    <h3>配对流程</h3>
+
+    <div class="flow-container">
+      <div class="flow-node flow-node-session">
+        <strong>Node 发起</strong><br>
+        requestNodePairing<br>
+        提交 deviceId + clientId
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <div class="flow-arrow-label">等待审批</div>
+      </div>
+      <div class="flow-node flow-node-main">
+        <strong>管理员审批</strong><br>
+        approveNodePairing /<br>
+        rejectNodePairing
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <div class="flow-arrow-label">签发 token</div>
+      </div>
+      <div class="flow-node flow-node-exec">
+        <strong>Node 验证</strong><br>
+        verifyNodeToken<br>
+        建立 WebSocket 连接
+      </div>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        安全设计
+      </div>
+      <p>配对请求使用 <strong>nonce + 时间戳</strong> 双重防重放机制。
+        V3 载荷额外包含 <code>platform</code> 和 <code>deviceFamily</code>，
+        使 Gateway 能够根据设备类型实施差异化权限策略（如限制移动端的 exec 权限）。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: APNs ==================== -->
+  <section id="apns" class="animate-in delay-1">
+    <h2>APNs 推送唤醒</h2>
+
+    <p>
+      当 Gateway 需要在某个 iOS/macOS Node 上执行命令，但该 Node 当前不在线时，
+      系统会通过 <strong>Apple Push Notification service (APNs)</strong> 发送静默推送来唤醒设备。
+    </p>
+
+    <h3>两种推送类型</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>类型</th><th>函数</th><th>APNs push-type</th><th>priority</th><th>用途</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Alert</strong></td>
+            <td><code>sendApnsAlert()</code></td>
+            <td><code>alert</code></td>
+            <td><code>10</code>（立即）</td>
+            <td>测试推送、用户可见通知</td>
+          </tr>
+          <tr>
+            <td><strong>Background Wake</strong></td>
+            <td><code>sendApnsBackgroundWake()</code></td>
+            <td><code>background</code></td>
+            <td><code>5</code>（节能）</td>
+            <td>静默唤醒设备重连 Gateway</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/infra/push-apns.ts</span>
+      </div>
+      <pre><code class="language-typescript">// 静默推送唤醒 — content-available: 1 告诉 iOS 在后台唤醒 app
+export async function sendApnsBackgroundWake(params) {
+  const payload = {
+    aps: {
+      "content-available": 1,  // iOS 后台唤醒标志
+    },
+    openclaw: {
+      kind: "node.wake",      // OpenClaw 自定义元数据
+      reason: params.wakeReason ?? "node.invoke",
+      nodeId: params.nodeId,
+      ts: Date.now(),
+    },
+  };
+  return await sendApnsPush({
+    pushType: "background",    // APNs 静默推送类型
+    priority: "5",             // 节能优先级
+  });
+}</code></pre>
+    </div>
+
+    <h3>唤醒后的重连等待</h3>
+
+    <p>
+      推送发出后，Gateway 并不立即放弃。它会进入一个 <strong>轮询等待</strong> 周期，
+      等待目标 Node 重新建立 WebSocket 连接：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/gateway/server-methods/nodes.ts</span>
+      </div>
+      <pre><code class="language-typescript">export const NODE_WAKE_RECONNECT_WAIT_MS      = 3_000;   // 首次等待 3 秒
+export const NODE_WAKE_RECONNECT_RETRY_WAIT_MS = 12_000;  // 重试等待 12 秒
+export const NODE_WAKE_RECONNECT_POLL_MS       = 150;     // 每 150ms 轮询一次
+const NODE_WAKE_THROTTLE_MS                    = 15_000;  // 同一 Node 15 秒内不重复唤醒</code></pre>
+    </div>
+
+    <h3>APNs JWT 认证</h3>
+
+    <p>
+      OpenClaw 使用 <strong>ES256 JWT token</strong> 与 APNs 通信，支持从环境变量或文件读取 .p8 私钥。
+      JWT 有 50 分钟缓存期（<code>APNS_JWT_TTL_MS</code>），避免频繁签名的开销。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>环境变量</th><th>用途</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>OPENCLAW_APNS_TEAM_ID</code></td><td>Apple Developer Team ID</td></tr>
+          <tr><td><code>OPENCLAW_APNS_KEY_ID</code></td><td>APNs Auth Key ID</td></tr>
+          <tr><td><code>OPENCLAW_APNS_PRIVATE_KEY_P8</code></td><td>内联 .p8 私钥（或使用 <code>_PATH</code> 指定文件路径）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        APNs 推送唤醒就像酒店的 wake-up call 服务。客人（iOS 设备）退房休息后，
+        前台（Gateway）无法直接联系，但可以通过电话总机（Apple Push Service）
+        拨一个无声电话（<code>content-available: 1</code>），让客人自己走到前台报到（重新建立 WebSocket 连接）。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE INDEX ==================== -->
+  <section id="source" class="animate-in delay-2">
+    <h2>源码索引</h2>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>模块</th><th>关键文件</th><th>职责</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td rowspan="4"><strong>Cron</strong></td>
+            <td><code>src/cron/schedule.ts</code></td>
+            <td>cron / every / at 三种调度模式的 nextRunAtMs 计算</td>
+          </tr>
+          <tr>
+            <td><code>src/cron/service/ops.ts</code></td>
+            <td>Cron 服务 CRUD：start / stop / add / update / remove / run</td>
+          </tr>
+          <tr>
+            <td><code>src/cron/service/timer.ts</code></td>
+            <td>armTimer 定时驱动、wake 任务分发、missed jobs 追赶</td>
+          </tr>
+          <tr>
+            <td><code>src/cron/isolated-agent/run.ts</code></td>
+            <td>隔离 Agent 运行：独立 session、model override、交付结果</td>
+          </tr>
+          <tr>
+            <td rowspan="3"><strong>Heartbeat</strong></td>
+            <td><code>src/infra/heartbeat-runner.ts</code></td>
+            <td>HeartbeatRunner 主循环、多 Agent 调度、去重与剪枝</td>
+          </tr>
+          <tr>
+            <td><code>src/infra/heartbeat-wake.ts</code></td>
+            <td>全局 heartbeat 开关、requestHeartbeatNow 请求合并</td>
+          </tr>
+          <tr>
+            <td><code>src/auto-reply/heartbeat.ts</code></td>
+            <td>HEARTBEAT_TOKEN、stripHeartbeatToken、prompt 模板</td>
+          </tr>
+          <tr>
+            <td rowspan="2"><strong>Node</strong></td>
+            <td><code>src/gateway/node-registry.ts</code></td>
+            <td>NodeRegistry：设备注册 / 注销 / 远程调用 / 事件推送</td>
+          </tr>
+          <tr>
+            <td><code>src/gateway/device-auth.ts</code></td>
+            <td>设备认证载荷构造（v2/v3 协议）</td>
+          </tr>
+          <tr>
+            <td rowspan="2"><strong>APNs</strong></td>
+            <td><code>src/infra/push-apns.ts</code></td>
+            <td>APNs 推送：alert + background wake、JWT 认证、token 注册</td>
+          </tr>
+          <tr>
+            <td><code>src/gateway/server-methods/nodes.ts</code></td>
+            <td>Node 远程调用、APNs wake 触发、重连轮询</td>
+          </tr>
+          <tr>
+            <td><strong>Lane</strong></td>
+            <td><code>src/gateway/server-lanes.ts</code></td>
+            <td>Lane 并发度配置：Cron / Main / Subagent</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; <a href="../index.html">返回总览</a></p>
+  </footer>
+</main>
+
+<script>
+  hljs.highlightAll();
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) currentId = section.id;
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

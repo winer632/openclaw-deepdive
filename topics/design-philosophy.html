@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>关键设计哲学 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的设计哲学：No Magic、Trust Boundary、Markdown-Native Interface、单进程架构、File as Configuration">
+  <link rel="stylesheet" href="../assets/style.css">
+  <!-- Syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents (fixed side panel on wide screens) -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#no-magic">"No Magic" 哲学</a>
+  <a href="#trust-boundary">Trust Boundary as Session Key</a>
+  <a href="#markdown-native">Markdown 作为 LLM 原生接口</a>
+  <a href="#lane-queue-elegance">Lane Queue 的极简之美</a>
+  <a href="#memory-flush">Memory Flush 与 Markdown 注入</a>
+  <a href="#file-as-config">File as Configuration</a>
+  <a href="#single-process">单进程架构决策</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>关键设计哲学<br>Design Philosophy</h1>
+    <p class="doc-hero-subtitle">
+      OpenClaw 的代码中隐含着一套连贯的设计信仰。这些不是事后总结的教条，
+      而是在数千次决策中自然浮现的模式。理解它们，就能预测 OpenClaw 面对新问题时会做出什么选择。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        CLAUDE.md, src/process/, src/agents/workspace.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: NO MAGIC ==================== -->
+  <section id="no-magic" class="animate-in delay-1">
+    <h2>"No Magic" 哲学</h2>
+
+    <p>
+      OpenClaw 的代码有一个鲜明的特征：<strong>拒绝隐藏状态</strong>。
+      在一个充满"智能框架"和"魔法抽象"的 AI 应用生态中，OpenClaw 选择了透明和可预测。
+    </p>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        核心信条
+      </div>
+      <p>"如果你不能通过阅读代码理解系统的行为，那说明代码写得不够好——而不是说你需要更多文档。"</p>
+    </div>
+
+    <p>这一哲学体现在四个关键设计决策中：</p>
+
+    <h3>1. 严格类型，禁止 any</h3>
+
+    <p>
+      CLAUDE.md 中的规则是明确的："<em>Strict TypeScript, no <code>any</code>, no <code>@ts-nocheck</code></em>"。
+      这不仅是代码风格偏好——在一个多通道 AI 系统中，任何类型逃逸都可能导致运行时错误在消息流转的深处爆发，
+      而此时的调试成本远高于写类型注解的成本。
+    </p>
+
+    <h3>2. 显式依赖注入</h3>
+
+    <p>
+      OpenClaw 使用 <code>createDefaultDeps</code> 模式进行依赖注入，而非任何 DI 框架或装饰器魔法。
+      每个函数的依赖项通过参数显式传入，测试时可以直接替换——不需要 mock 框架、不需要容器、不需要理解注入生命周期。
+    </p>
+
+    <h3>3. 不共享行为通过原型变异</h3>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        硬性规则
+      </div>
+      <p>
+        "Never share class behavior via prototype mutation (<code>applyPrototypeMixins</code>,
+        <code>Object.defineProperty</code> on <code>.prototype</code>)."
+        —— 如果 TypeScript 编译器无法追踪某个方法的来源，那它就不应该存在。
+        使用显式继承（<code>A extends B extends C</code>）或组合。
+      </p>
+    </div>
+
+    <h3>4. 避免动态导入与静态导入混用</h3>
+
+    <p>
+      对同一个模块，不允许同时使用 <code>await import("x")</code> 和 <code>import ... from "x"</code>。
+      如果需要懒加载，必须创建专门的 <code>*.runtime.ts</code> 边界文件。
+      这消除了模块初始化顺序的不确定性——一个在 AI Agent 系统中尤其致命的问题，
+      因为 Agent 的工具链可能在任意时间点被动态加载。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: TRUST BOUNDARY ==================== -->
+  <section id="trust-boundary">
+    <h2>Trust Boundary as Session Key</h2>
+
+    <p>
+      OpenClaw 的会话密钥（Session Key）不仅是一个标识符——它<strong>编码了权限拓扑</strong>。
+      通过解析 Session Key 的结构，系统可以确定一条消息的信任级别，而无需查询任何外部权限存储。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">Session Key 命名约定</span>
+      </div>
+      <pre><code class="language-typescript">// 标准会话 Key 结构
+"agent:main:alice"           // Agent main 与 alice 的对话
+"agent:coding:bob"           // Agent coding 与 bob 的对话
+"cron:daily-summary"         // Cron Job 的隔离会话
+"agent:main:subagent:abc123" // 子 Agent 会话
+
+// 通过 Key 结构推断信任边界
+isCronSessionKey(key)      // "cron:" 前缀 → 无用户输入，信任级别高
+isSubagentSessionKey(key)  // "subagent:" 段 → 受父 Agent 约束
+resolveAgentIdFromSessionKey(key) // 提取 agentId → 确定权限域</code></pre>
+    </div>
+
+    <p>
+      这种设计的优势在于<strong>零查询权限判断</strong>——Lane Queue 在决定任务调度时，
+      只需要解析 Session Key 的字符串结构，就能确定哪些任务属于同一会话（需要串行），
+      哪些属于不同的 Agent（可以并行）。不需要数据库查询、不需要权限服务调用。
+    </p>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        Session Key 就像<strong>邮政编码</strong>——看到 "100000" 你就知道是北京，看到 "200000" 你就知道是上海。
+        不需要查询地图数据库，编码本身就携带了地理信息。同样，<code>agent:coding:alice</code>
+        这个 Key 本身就告诉你：这是 coding Agent 域下 alice 用户的会话。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: MARKDOWN NATIVE ==================== -->
+  <section id="markdown-native">
+    <h2>Markdown 作为 LLM 原生接口</h2>
+
+    <p>
+      OpenClaw 没有设计专门的 DSL 来定义 Agent 的行为——它使用 <strong>Markdown 文件</strong>。
+      这不是偷懒，而是深思熟虑的架构决策：Markdown 是 LLM 的原生语言。
+    </p>
+
+    <h3>六种核心 Markdown 文件</h3>
+
+    <p>
+      每个 Agent 的工作区通过六种 Markdown 文件定义其完整的人格和行为：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>在系统中的角色</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>IDENTITY.md</td>
+            <td>身份定义</td>
+            <td>Agent 的名称、角色描述，决定 "我是谁"</td>
+          </tr>
+          <tr>
+            <td>SOUL.md</td>
+            <td>人格灵魂</td>
+            <td>核心行为指令、性格特征、交互风格</td>
+          </tr>
+          <tr>
+            <td>MEMORY.md</td>
+            <td>持久记忆</td>
+            <td>Agent 自主维护的长期记忆，跨会话保持</td>
+          </tr>
+          <tr>
+            <td>TOOLS.md</td>
+            <td>工具说明</td>
+            <td>可用工具的使用指南和约束</td>
+          </tr>
+          <tr>
+            <td>BOOTSTRAP.md</td>
+            <td>启动上下文</td>
+            <td>每次会话开始时加载的额外上下文</td>
+          </tr>
+          <tr>
+            <td>HEARTBEAT.md</td>
+            <td>心跳指令</td>
+            <td>定期巡检时的待办事项列表</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/workspace.ts — 文件名常量</span>
+      </div>
+      <pre><code class="language-typescript">export const DEFAULT_AGENTS_FILENAME = "AGENTS.md";
+export const DEFAULT_SOUL_FILENAME = "SOUL.md";
+export const DEFAULT_TOOLS_FILENAME = "TOOLS.md";
+export const DEFAULT_IDENTITY_FILENAME = "IDENTITY.md";
+export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
+export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
+export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";</code></pre>
+    </div>
+
+    <h3>为什么是 Markdown？</h3>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-bad">
+        <h4 style="color: var(--accent);">如果用 JSON/YAML 定义 Agent</h4>
+        <p>
+          需要设计 schema、写解析器、维护文档、处理版本迁移。
+          用户无法自然地表达"请温和一些"或"回复要简洁"这样的人格指令。
+          LLM 需要额外的 prompt engineering 来理解结构化指令。
+        </p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">用 Markdown 定义 Agent</h4>
+        <p>
+          用户用<strong>自然语言</strong>直接描述 Agent 的行为——LLM 天生就理解 Markdown。
+          Agent 可以自主读写 MEMORY.md（自我进化）。
+          不需要解析器——文件内容直接注入 system prompt。
+          用任何文本编辑器都能修改。
+        </p>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        行业趋势
+      </div>
+      <p>这一设计与 Anthropic 的 Claude Code 高度趋同——Claude Code 也使用 CLAUDE.md 文件来定义 Agent 的行为和项目上下文。
+      这不是巧合，而是行业对 "Markdown 是 LLM 的原生配置语言" 这一认知的独立收敛。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: LANE QUEUE ELEGANCE ==================== -->
+  <section id="lane-queue-elegance">
+    <h2>Lane Queue 的极简之美</h2>
+
+    <p>
+      Lane Queue 是 OpenClaw 设计哲学的<strong>最佳缩影</strong>。
+      它用纯 TypeScript 实现了一个完整的并发控制系统——没有 Redis，没有消息中间件，
+      没有后台线程，甚至没有任何第三方依赖。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">Lane Queue 的技术选型</div>
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-2);">数据结构</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-session" style="width:auto;padding:0 12px;">Map</div>
+          <div class="lane-slot lane-slot-session" style="width:auto;padding:0 12px;">Array</div>
+          <div class="lane-slot lane-slot-session" style="width:auto;padding:0 12px;">Set</div>
+        </div>
+        <span class="lane-info">JavaScript 内建，零依赖</span>
+      </div>
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-3);">调度机制</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-main" style="width:auto;padding:0 12px;">Promise</div>
+          <div class="lane-slot lane-slot-main" style="width:auto;padding:0 12px;">async/await</div>
+        </div>
+        <span class="lane-info">零 CPU 等待，推送模型</span>
+      </div>
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-4);">驱动引擎</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-subagent" style="width:auto;padding:0 12px;">Pump</div>
+        </div>
+        <span class="lane-info">自驱动，完成即触发</span>
+      </div>
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent);">总代码量</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-cron" style="width:auto;padding:0 12px;">~324 行</div>
+        </div>
+        <span class="lane-info">command-queue.ts 全部代码</span>
+      </div>
+    </div>
+
+    <p>
+      约 324 行代码实现了：per-session 串行、全局吞吐量控制、子 Agent 并发、定时任务队列、
+      任务取消（generation 机制）、车道清除、背压（长时间排队告警）。
+      这不是简化——这是<strong>精确匹配需求的最小实现</strong>。
+    </p>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        设计原则
+      </div>
+      <p>
+        <strong>"不是 Promise 比 Redis 更强，而是在单进程场景下，简单方案就是最优方案。"</strong>
+        引入 Redis 不会带来任何好处，反而增加部署复杂度、网络延迟和运维负担。
+        OpenClaw 坚持的原则是：<em>不要为还不存在的需求预先设计</em>。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: MEMORY FLUSH ==================== -->
+  <section id="memory-flush">
+    <h2>Memory Flush 与 Markdown 注入</h2>
+
+    <p>
+      MEMORY.md 是 OpenClaw 实现<strong>跨会话记忆持久化</strong>的核心机制。
+      Agent 在对话过程中可以自主将重要信息写入 MEMORY.md 文件，
+      这些信息在后续的每次会话启动时都会作为 bootstrap 上下文被注入到 system prompt 中。
+    </p>
+
+    <h3>Memory Flush 工作原理</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">记忆持久化与注入循环</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>对话中：Agent 学到新信息</strong><br>
+          <span style="font-size:0.8rem;">"用户偏好 Claude 模型，不喜欢长回复"</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">Agent 使用文件工具写入</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>写入 MEMORY.md</strong><br>
+          <span style="font-size:0.8rem;">workspace/MEMORY.md（或 memory.md）</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">下次会话启动时</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>Bootstrap 注入 System Prompt</strong><br>
+          <span style="font-size:0.8rem;">loadWorkspaceBootstrapFiles() 自动加载 MEMORY.md</span>
+        </div>
+      </div>
+    </div>
+
+    <p>
+      这种设计巧妙地解决了 LLM 的<strong>上下文窗口限制</strong>：
+      不是试图让模型"记住"所有历史对话，而是让 Agent 自主决定哪些信息值得持久化，
+      并在每次对话开始时以 Markdown 注入的方式"回忆"这些信息。
+    </p>
+
+    <h3>与 Claude Code 的趋同</h3>
+
+    <p>
+      Anthropic 的 Claude Code 后来也独立实现了几乎相同的机制——通过 CLAUDE.md 文件注入项目上下文和用户偏好。
+      两个项目在没有相互参考的情况下达到了相同的设计结论：
+      <strong>对于 LLM 来说，Markdown 文件就是最自然的长期记忆介质</strong>。
+    </p>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        MEMORY.md 就像一个人的<strong>个人笔记本</strong>。
+        你不会记住每次对话的每句话，但你会在笔记本上写下重要的信息。
+        每天早上你翻开笔记本回顾一下——这就是 bootstrap 注入。
+        笔记本的内容是你自己写的——这就是 Agent 自主维护 MEMORY.md。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: FILE AS CONFIG ==================== -->
+  <section id="file-as-config">
+    <h2>"File as Configuration" 哲学</h2>
+
+    <p>
+      OpenClaw 的配置系统深度践行<strong>"文件就是配置"</strong>的理念。
+      从 Agent 人格（Markdown 文件）到系统配置（JSON 文件）到设备状态（JSON 文件），
+      一切都是本地文件系统上可读、可编辑、可版本控制的文件。
+    </p>
+
+    <h3>配置层次</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>配置类型</th>
+            <th>文件格式</th>
+            <th>存储位置</th>
+            <th>可热重载</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>系统配置</td>
+            <td>JSON</td>
+            <td><code>~/.openclaw/openclaw.json</code></td>
+            <td style="color:var(--accent-3);font-weight:600;">是</td>
+          </tr>
+          <tr>
+            <td>Agent 人格</td>
+            <td>Markdown</td>
+            <td><code>~/.openclaw/workspace/*.md</code></td>
+            <td style="color:var(--accent-3);font-weight:600;">是（带缓存）</td>
+          </tr>
+          <tr>
+            <td>会话状态</td>
+            <td>JSON + JSONL</td>
+            <td><code>~/.openclaw/agents/*/sessions/</code></td>
+            <td>运行时管理</td>
+          </tr>
+          <tr>
+            <td>设备配对</td>
+            <td>JSON</td>
+            <td><code>~/.openclaw/state/pairing/</code></td>
+            <td>原子写入</td>
+          </tr>
+          <tr>
+            <td>Cron 任务</td>
+            <td>JSON</td>
+            <td><code>~/.openclaw/state/cron/</code></td>
+            <td>运行时管理</td>
+          </tr>
+          <tr>
+            <td>认证凭据</td>
+            <td>JSON</td>
+            <td><code>~/.openclaw/agents/*/agent/</code></td>
+            <td>运行时管理</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>文件缓存与安全读取</h3>
+
+    <p>
+      工作区文件通过 <code>readWorkspaceFileWithGuards</code> 函数读取，该函数实现了三层保护：
+    </p>
+
+    <ol>
+      <li><strong>边界检查</strong>（<code>openBoundaryFile</code>）—— 确保路径不逃逸出工作区根目录（防止路径穿越）</li>
+      <li><strong>大小限制</strong>（<code>MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES = 2MB</code>）—— 防止恶意超大文件拖垮启动</li>
+      <li><strong>身份缓存</strong>（<code>inode + dev + size + mtime</code>）—— 通过文件系统元数据判断文件是否变化，避免不必要的磁盘读取</li>
+    </ol>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        设计优势
+      </div>
+      <p>文件作为配置的最大优势是<strong>可观测性</strong>——你可以用 <code>cat</code> 查看任何配置、
+      用 <code>git diff</code> 追踪变化、用文本编辑器修改任何参数。没有数据库需要连接，没有管理面板需要学习，
+      没有 API 需要调用。这对于一个"个人 AI 助手"产品来说，是最合适的选择。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SINGLE PROCESS ==================== -->
+  <section id="single-process">
+    <h2>单进程架构决策</h2>
+
+    <p>
+      OpenClaw Gateway 运行在<strong>单个 Node.js 进程</strong>中。所有消息通道（Telegram、Discord、Slack、Signal、WhatsApp 等）、
+      所有 Agent、所有定时任务、所有设备连接——都在同一个进程的同一个事件循环中处理。
+    </p>
+
+    <p>
+      这不是技术债或临时方案——这是一个<strong>深思熟虑的架构决策</strong>。
+    </p>
+
+    <h3>为什么不用微服务？</h3>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-bad">
+        <h4 style="color: var(--accent);">微服务架构（如果 OpenClaw 这样设计）</h4>
+        <p>
+          每个通道一个服务 + 共享 Redis/队列 + Agent 执行器集群 + 配置中心 + 服务发现。
+          部署需要 Docker Compose 或 Kubernetes，个人用户望而却步。
+          进程间通信增加延迟，状态同步引入一致性问题。
+        </p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">单进程架构（OpenClaw 的选择）</h4>
+        <p>
+          <code>npm install -g openclaw</code> 一条命令安装，<code>openclaw gateway run</code> 一条命令启动。
+          进程内 Map + Array + Promise 替代分布式队列。
+          状态一致性由 JavaScript 单线程模型天然保证。
+          适合"个人 AI 助手"这一产品定位。
+        </p>
+      </div>
+    </div>
+
+    <h3>单进程的连锁效应</h3>
+
+    <p>
+      选择单进程架构不是一个孤立的决定——它影响了系统中几乎所有的技术选型：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>技术选型</th>
+            <th>如果是微服务</th>
+            <th>单进程的选择</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">并发控制</td>
+            <td>Redis 分布式锁</td>
+            <td style="color:var(--accent-3);font-weight:600;">Lane Queue（进程内 Promise 队列）</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">状态存储</td>
+            <td>PostgreSQL / Redis</td>
+            <td style="color:var(--accent-3);font-weight:600;">本地 JSON 文件（原子写入）</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">配置管理</td>
+            <td>etcd / Consul</td>
+            <td style="color:var(--accent-3);font-weight:600;">loadConfig() 读取本地 JSON</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">事件总线</td>
+            <td>RabbitMQ / Kafka</td>
+            <td style="color:var(--accent-3);font-weight:600;">进程内 EventEmitter + broadcast</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">部署复杂度</td>
+            <td>Docker Compose + 数据库 + 缓存</td>
+            <td style="color:var(--accent-3);font-weight:600;">一个 npm 包，一条命令启动</td>
+          </tr>
+          <tr>
+            <td style="font-family:var(--font-body);color:var(--ink);">调试体验</td>
+            <td>分布式追踪（Jaeger/Zipkin）</td>
+            <td style="color:var(--accent-3);font-weight:600;">console.log + 统一日志流</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>
+        OpenClaw 是一个<strong>单体小餐厅</strong>——一个厨师（进程）用一个厨房（事件循环）处理所有菜品（多通道消息），
+        本地叫号器（Lane Queue）管理出餐顺序。
+        它不是大型连锁餐厅——不需要中央调度系统、不需要跨门店物流、不需要供应链管理平台。
+        对于"个人助手"这一定位，单体就是最优解。
+      </p>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        架构哲学
+      </div>
+      <p>
+        OpenClaw 的每一个技术决策都指向同一个方向：
+        <strong>让个人用户能在自己的设备上运行一个始终在线、功能完整的 AI 助手——不需要运维团队、不需要云服务、不需要 DevOps 知识。</strong>
+        单进程架构不是限制，而是产品定位的自然结果。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source">
+    <h2>源码索引</h2>
+
+    <p>以下是体现各设计哲学的关键文件：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>体现的设计哲学</th>
+            <th>关键内容</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLAUDE.md (AGENTS.md)</td>
+            <td>No Magic / 编码规范</td>
+            <td>严格类型、ESM、禁止原型变异、显式 DI</td>
+          </tr>
+          <tr>
+            <td>src/process/command-queue.ts</td>
+            <td>Lane Queue 极简实现</td>
+            <td>~324 行纯 TS 实现完整并发控制</td>
+          </tr>
+          <tr>
+            <td>src/process/lanes.ts</td>
+            <td>Trust Boundary</td>
+            <td><code>CommandLane</code> 枚举与 Session Key 命名空间</td>
+          </tr>
+          <tr>
+            <td>src/agents/workspace.ts</td>
+            <td>Markdown-Native / File as Config</td>
+            <td>6 种 Markdown 文件常量、带缓存读取</td>
+          </tr>
+          <tr>
+            <td>src/agents/bootstrap-files.ts</td>
+            <td>Markdown 注入</td>
+            <td>Bootstrap 上下文组装（含 lightweight 模式）</td>
+          </tr>
+          <tr>
+            <td>src/agents/agent-scope.ts</td>
+            <td>Agent 隔离 / 配置覆盖</td>
+            <td>配置解析与合并逻辑</td>
+          </tr>
+          <tr>
+            <td>src/routing/session-key.ts</td>
+            <td>Trust Boundary as Session Key</td>
+            <td>Session Key 解析、Agent ID 提取</td>
+          </tr>
+          <tr>
+            <td>src/config/config.ts</td>
+            <td>File as Configuration</td>
+            <td><code>loadConfig()</code> 从 JSON 文件加载配置</td>
+          </tr>
+          <tr>
+            <td>src/infra/heartbeat-runner.ts</td>
+            <td>Memory Flush / Markdown 注入</td>
+            <td>Heartbeat 与 MEMORY.md 的交互</td>
+          </tr>
+          <tr>
+            <td>src/gateway/server.impl.ts</td>
+            <td>单进程架构</td>
+            <td>所有通道在单个进程中初始化</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="doc-footer">
+    <p>
+      OpenClaw Architecture Deep Dive &middot;
+      <a href="../index.html">返回总览</a>
+    </p>
+  </footer>
+
+</main>
+
+<script>
+  // Syntax highlighting
+  hljs.highlightAll();
+
+  // Scroll progress bar
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // TOC active state tracking
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) {
+        currentId = section.id;
+      }
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  // Animate-in on scroll (intersection observer)
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>

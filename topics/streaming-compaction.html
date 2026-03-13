@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Streaming 与 Compaction 架构 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的流式响应事件模型、Block Reply 分块系统、Context Window 管理与 Compaction 压缩策略">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#overview">总体架构</a>
+  <a href="#event-model">流式事件模型</a>
+  <a href="#block-reply">Block Reply 分块系统</a>
+  <a href="#compaction-trigger">Compaction 触发机制</a>
+  <a href="#summarization">分阶段摘要算法</a>
+  <a href="#safeguard">Compaction Safeguard 扩展</a>
+  <a href="#memory-flush">Memory Flush 与超时保护</a>
+  <a href="#lifecycle">完整生命周期</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Streaming 与 Compaction 架构</h1>
+    <p class="doc-hero-subtitle">从 LLM 流式 Token 到 Channel 消息投递、从 Context Window 溢出到摘要压缩 &mdash; 两条核心数据管线的完整解析</p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/agents/pi-embedded-subscribe.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+  <!-- Section 1: Overview -->
+  <section id="overview">
+    <h2>总体架构</h2>
+
+    <p>OpenClaw 的 Agent 运行涉及两条相互交织的数据管线：<strong>Streaming Pipeline</strong>（将 LLM 的流式响应实时投递到消息渠道）和 <strong>Compaction Pipeline</strong>（当上下文窗口接近容量时压缩对话历史）。两者都在 <code>subscribeEmbeddedPiSession()</code> 这一核心订阅函数中统一调度。</p>
+
+    <div class="analogy">
+      <span class="analogy-label">类比</span>
+      <p>Streaming 好比一条<strong>自来水管</strong>，LLM 的 Token 像水流一样持续流入，Block Reply 系统像一个蓄水池，攒够一定量后才放水给用户。而 Compaction 则像<strong>水管的减压阀</strong> &mdash; 当管道压力（上下文窗口使用量）过高时，它启动压缩，把过往的长对话浓缩成一段摘要，释放管道容量。</p>
+    </div>
+
+    <div class="diagram">
+      <div class="diagram-title">双管线架构全景</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-main">LLM Provider Stream</div>
+        <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-label">SSE events</div></div>
+        <div class="flow-node flow-node-session">subscribeEmbeddedPiSession()<br><small>事件分发 &amp; 状态管理</small></div>
+        <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-label">Block Reply</div></div>
+        <div class="flow-node flow-node-exec">Channel Delivery<br><small>Telegram / Discord / ...</small></div>
+      </div>
+    </div>
+
+    <div class="callout callout-key">
+      <span class="callout-label">关键设计</span>
+      <p><code>subscribeEmbeddedPiSession()</code>（位于 <code>src/agents/pi-embedded-subscribe.ts</code>）是整个 Streaming + Compaction 管线的中枢。它订阅 Pi Agent Session 的事件流，维护一个巨大的 <code>state</code> 对象跟踪所有运行时状态，并通过回调函数（<code>onBlockReply</code>、<code>onToolResult</code>、<code>onReasoningStream</code> 等）将处理后的数据推送到渠道。</p>
+    </div>
+  </section>
+
+  <!-- Section 2: Event Model -->
+  <section id="event-model">
+    <h2>流式事件模型</h2>
+
+    <p>Pi Agent Session 产生的事件流通过 <code>createEmbeddedPiSessionEventHandler()</code> 分发到不同的 handler。共有 <strong>8 种核心事件类型</strong>：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>事件类型</th>
+            <th>Handler</th>
+            <th>触发时机</th>
+            <th>关键行为</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>message_start</code></td>
+            <td><code>handleMessageStart()</code></td>
+            <td>新 Assistant 消息开始</td>
+            <td>重置 assistant 消息状态，触发 typing indicator</td>
+          </tr>
+          <tr>
+            <td><code>message_update</code></td>
+            <td><code>handleMessageUpdate()</code></td>
+            <td>流式 delta/text 更新</td>
+            <td>处理 <code>text_delta</code>、<code>thinking_delta</code>、<code>text_end</code>；驱动 Block Reply 分块；推送 Reasoning stream</td>
+          </tr>
+          <tr>
+            <td><code>message_end</code></td>
+            <td><code>handleMessageEnd()</code></td>
+            <td>Assistant 消息结束</td>
+            <td>最终化 assistant 文本，记录 usage</td>
+          </tr>
+          <tr>
+            <td><code>tool_execution_start</code></td>
+            <td><code>handleToolExecutionStart()</code></td>
+            <td>工具调用开始</td>
+            <td>Flush 挂起的 Block Reply，发送工具摘要</td>
+          </tr>
+          <tr>
+            <td><code>tool_execution_update</code></td>
+            <td><code>handleToolExecutionUpdate()</code></td>
+            <td>工具执行进度</td>
+            <td>实时工具输出（verbose 模式）</td>
+          </tr>
+          <tr>
+            <td><code>tool_execution_end</code></td>
+            <td><code>handleToolExecutionEnd()</code></td>
+            <td>工具调用结束</td>
+            <td>提交/回滚 messaging tool 文本跟踪</td>
+          </tr>
+          <tr>
+            <td><code>auto_compaction_start</code></td>
+            <td><code>handleAutoCompactionStart()</code></td>
+            <td>自动压缩开始</td>
+            <td>设置 <code>compactionInFlight</code> 标志，触发 <code>before_compaction</code> hook</td>
+          </tr>
+          <tr>
+            <td><code>auto_compaction_end</code></td>
+            <td><code>handleAutoCompactionEnd()</code></td>
+            <td>自动压缩结束</td>
+            <td>处理 retry 逻辑，重置 state，触发 <code>after_compaction</code> hook</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-subscribe.handlers.ts</span>
+      </div>
+      <pre><code class="language-typescript">export function createEmbeddedPiSessionEventHandler(ctx: EmbeddedPiSubscribeContext) {
+  return (evt: EmbeddedPiSubscribeEvent) => {
+    switch (evt.type) {
+      case "message_start":    handleMessageStart(ctx, evt); return;
+      case "message_update":   handleMessageUpdate(ctx, evt); return;
+      case "message_end":      handleMessageEnd(ctx, evt); return;
+      case "tool_execution_start":
+        handleToolExecutionStart(ctx, evt).catch(/*...*/); return;
+      case "tool_execution_update":
+        handleToolExecutionUpdate(ctx, evt); return;
+      case "tool_execution_end":
+        handleToolExecutionEnd(ctx, evt).catch(/*...*/); return;
+      case "agent_start":           handleAgentStart(ctx); return;
+      case "auto_compaction_start": handleAutoCompactionStart(ctx); return;
+      case "auto_compaction_end":   handleAutoCompactionEnd(ctx, evt); return;
+      case "agent_end":             handleAgentEnd(ctx); return;
+    }
+  };
+}</code></pre>
+    </div>
+
+    <h3>Thinking Tag 过滤</h3>
+
+    <p>流式文本在投递前需要清洗 <code>&lt;think&gt;</code> / <code>&lt;final&gt;</code> 标签。<code>stripBlockTags()</code> 函数使用<strong>有状态的正则扫描</strong>，跨 chunk 边界追踪标签开合：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-subscribe.ts &mdash; stripBlockTags()</span>
+      </div>
+      <pre><code class="language-typescript">const THINKING_TAG_SCAN_RE =
+  /&lt;\s*(\/?)\s*(?:think(?:ing)?|thought|antthinking)\s*&gt;/gi;
+
+const stripBlockTags = (text, state) => {
+  // 1. 有状态地追踪 &lt;think&gt; 块，跳过其中的内容
+  let inThinking = state.thinking;
+  for (const match of text.matchAll(THINKING_TAG_SCAN_RE)) {
+    // 跳过代码块内的 tag（避免误伤）
+    if (codeSpans.isInside(match.index)) continue;
+    // ...
+    inThinking = !isClose;
+  }
+  state.thinking = inThinking; // 跨 chunk 保持状态
+
+  // 2. 如果启用了 enforceFinalTag，只保留 &lt;final&gt; 块内的内容
+  // 严格模式: 没见到 &lt;final&gt; 标签则返回空字符串
+  if (!everInFinal) return "";
+};</code></pre>
+    </div>
+  </section>
+
+  <!-- Section 3: Block Reply -->
+  <section id="block-reply">
+    <h2>Block Reply 分块系统</h2>
+
+    <p>LLM 的流式响应是逐 Token 到达的，但消息渠道（如 Telegram、Discord）不适合每个 Token 都发一条消息。Block Reply 系统将流式 Token 缓冲成合适大小的 "块"，在自然断点处发送。</p>
+
+    <h3>EmbeddedBlockChunker</h3>
+
+    <p>核心分块器 <code>EmbeddedBlockChunker</code>（位于 <code>src/agents/pi-embedded-block-chunker.ts</code>）使用可配置的分块策略：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>参数</th>
+            <th>类型</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>minChars</code></td>
+            <td><code>number</code></td>
+            <td>最小缓冲字符数，低于此值不触发分块</td>
+          </tr>
+          <tr>
+            <td><code>maxChars</code></td>
+            <td><code>number</code></td>
+            <td>最大缓冲字符数，超过时强制分块</td>
+          </tr>
+          <tr>
+            <td><code>breakPreference</code></td>
+            <td><code>"paragraph" | "newline" | "sentence"</code></td>
+            <td>分块断点偏好</td>
+          </tr>
+          <tr>
+            <td><code>flushOnParagraph</code></td>
+            <td><code>boolean</code></td>
+            <td>遇到 <code>\n\n</code> 段落边界时是否立即刷新（忽略 minChars）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-block-chunker.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type BlockReplyChunking = {
+  minChars: number;
+  maxChars: number;
+  breakPreference?: "paragraph" | "newline" | "sentence";
+  flushOnParagraph?: boolean;
+};
+
+export class EmbeddedBlockChunker {
+  #buffer = "";
+  readonly #chunking: BlockReplyChunking;
+
+  // 断点搜索优先级（以 paragraph 偏好为例）:
+  // 1. findSafeParagraphBreakIndex() - 在 \n\n 处断开
+  // 2. findSafeNewlineBreakIndex()   - 退而求其次在 \n 处
+  // 3. findSafeSentenceBreakIndex()  - 最后在 .!? 处
+  // 所有搜索都会检查 Fenced Code Block 状态
+}</code></pre>
+    </div>
+
+    <h3>Fence-safe 分块</h3>
+
+    <div class="callout callout-insight">
+      <span class="callout-label">洞察</span>
+      <p>分块器在寻找断点时会检查 <strong>Fenced Code Block</strong> 的状态。如果候选断点位于一个未闭合的 <code>```</code> 代码块内部，分块器会<strong>拒绝在此断开</strong>，以避免将不完整的代码块发送给用户。当确实需要在代码块中间断开（超过 maxChars）时，分块器会生成一对 <code>closeFenceLine</code> + <code>reopenFenceLine</code>，在断点处先关闭再重新打开代码块。</p>
+    </div>
+
+    <h3>Messaging Tool 去重</h3>
+
+    <p>当 Agent 通过 <code>message</code> 工具主动发送了消息，Block Reply 系统会检测并跳过重复内容，避免用户收到两条一样的消息：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-subscribe.ts &mdash; emitBlockChunk()</span>
+      </div>
+      <pre><code class="language-typescript">const emitBlockChunk = (text: string) => {
+  // 清洗 &lt;think&gt; 标签和降级工具文本
+  const chunk = stripDowngradedToolCallText(
+    stripBlockTags(text, state.blockState)
+  ).trimEnd();
+  if (!chunk) return;
+
+  // 跳过与上一次发送完全相同的内容
+  if (chunk === state.lastBlockReplyText) return;
+
+  // 跳过已通过 messaging tool 发送的内容（normalized 比较）
+  const normalized = normalizeTextForComparison(chunk);
+  if (isMessagingToolDuplicateNormalized(
+    normalized, messagingToolSentTextsNormalized
+  )) {
+    log.debug(`Skipping block reply - already sent via messaging tool`);
+    return;
+  }
+
+  state.lastBlockReplyText = chunk;
+  assistantTexts.push(chunk);
+  // 解析 reply directives 后投递
+  emitBlockReplySafely({ text: cleanedText, mediaUrls, ... });
+};</code></pre>
+    </div>
+
+    <h3>Block Reply Break 模式</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>模式</th>
+            <th>行为</th>
+            <th>适用场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>"text_end"</code>（默认）</td>
+            <td>等到 <code>text_end</code> 事件时才发送完整文本</td>
+            <td>大部分渠道</td>
+          </tr>
+          <tr>
+            <td>自定义 chunking</td>
+            <td>基于 <code>EmbeddedBlockChunker</code> 的 minChars/maxChars 进行流式分块</td>
+            <td>需要实时打字效果的渠道</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Section 4: Compaction Trigger -->
+  <section id="compaction-trigger">
+    <h2>Compaction 触发机制</h2>
+
+    <p>当对话越来越长，上下文窗口（Context Window）逐渐被填满。Compaction 是 OpenClaw 自动压缩对话历史的机制，防止超出模型的 Token 上限。</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Compaction 触发流程</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">Context Window 使用量监控</div>
+        <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-label">超过阈值</div></div>
+        <div class="flow-node flow-node-main">auto_compaction_start 事件</div>
+        <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-label">summarize</div></div>
+        <div class="flow-node flow-node-exec">旧消息替换为摘要</div>
+      </div>
+    </div>
+
+    <h3>触发方式</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>触发方式</th>
+            <th>入口函数</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Overflow 自动触发</strong></td>
+            <td>Pi Agent 内核的 <code>auto_compaction_start</code> 事件</td>
+            <td>当 Token 使用量接近 Context Window 上限时，Pi Agent 自动发起 Compaction，通过事件通知 OpenClaw</td>
+          </tr>
+          <tr>
+            <td><strong>手动触发</strong></td>
+            <td><code>compactEmbeddedPiSession()</code></td>
+            <td>用户通过 <code>/compact</code> 命令手动触发，走 session lane + global lane 队列</td>
+          </tr>
+          <tr>
+            <td><strong>Direct 模式</strong></td>
+            <td><code>compactEmbeddedPiSessionDirect()</code></td>
+            <td>已在 lane 内部时使用，避免死锁</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Context Window 配置</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/context-window-guard.ts</span>
+      </div>
+      <pre><code class="language-typescript">export const CONTEXT_WINDOW_HARD_MIN_TOKENS = 16_000;
+export const CONTEXT_WINDOW_WARN_BELOW_TOKENS = 32_000;
+
+// 解析优先级: modelsConfig > model metadata > agentContextTokens > default
+export function resolveContextWindowInfo(params: {
+  cfg: OpenClawConfig | undefined;
+  provider: string;
+  modelId: string;
+  modelContextWindow?: number;
+  defaultTokens: number; // DEFAULT_CONTEXT_TOKENS = 200_000
+}): ContextWindowInfo {
+  // 1. 检查 models.providers[provider].models[id].contextWindow
+  // 2. 检查 model metadata 的 contextWindow
+  // 3. 应用 agents.defaults.contextTokens 上限
+  // 4. 回退到 DEFAULT_CONTEXT_TOKENS (200,000)
+}</code></pre>
+    </div>
+
+    <div class="callout callout-warning">
+      <span class="callout-label">注意</span>
+      <p><code>agents.defaults.contextTokens</code> 配置项是一个<strong>上限 cap</strong>，不会放大模型的原生窗口，只会缩小。如果模型的 contextWindow 是 128K 但配置了 <code>contextTokens: 100000</code>，则使用 100K。如果模型 contextWindow 是 32K 而配置了 200K，则使用 32K。</p>
+    </div>
+  </section>
+
+  <!-- Section 5: Summarization Algorithm -->
+  <section id="summarization">
+    <h2>分阶段摘要算法</h2>
+
+    <p>Compaction 的核心是将旧对话消息压缩成一段摘要。这由 <code>src/agents/compaction.ts</code> 中的 <code>summarizeInStages()</code> 函数实现，采用分段-合并策略处理大量消息。</p>
+
+    <div class="diagram">
+      <div class="diagram-title">分阶段摘要流程</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">消息列表<br><small>messages[]</small></div>
+        <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-label">splitMessagesByTokenShare</div></div>
+        <div class="flow-node flow-node-main">分段摘要<br><small>chunk1 -> summary1<br>chunk2 -> summary2</small></div>
+        <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-label">merge summaries</div></div>
+        <div class="flow-node flow-node-exec">最终合并摘要</div>
+      </div>
+    </div>
+
+    <h3>核心算法参数</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>常量</th>
+            <th>值</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>BASE_CHUNK_RATIO</code></td>
+            <td>0.4</td>
+            <td>基础分块比例，chunk 大小 = contextWindow * 0.4</td>
+          </tr>
+          <tr>
+            <td><code>MIN_CHUNK_RATIO</code></td>
+            <td>0.15</td>
+            <td>最小分块比例（当消息平均很大时降低）</td>
+          </tr>
+          <tr>
+            <td><code>SAFETY_MARGIN</code></td>
+            <td>1.2</td>
+            <td>20% 安全缓冲区，补偿 <code>estimateTokens()</code> 的低估</td>
+          </tr>
+          <tr>
+            <td><code>SUMMARIZATION_OVERHEAD_TOKENS</code></td>
+            <td>4,096</td>
+            <td>摘要 prompt 本身的 Token 开销预留</td>
+          </tr>
+          <tr>
+            <td><code>DEFAULT_PARTS</code></td>
+            <td>2</td>
+            <td>默认将消息分成 2 段</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>自适应分块比例</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/compaction.ts &mdash; computeAdaptiveChunkRatio()</span>
+      </div>
+      <pre><code class="language-typescript">// 当消息平均大小 > 上下文窗口的 10% 时，动态缩小分块比例
+export function computeAdaptiveChunkRatio(
+  messages: AgentMessage[],
+  contextWindow: number,
+): number {
+  const totalTokens = estimateMessagesTokens(messages);
+  const avgTokens = totalTokens / messages.length;
+  const safeAvgTokens = avgTokens * SAFETY_MARGIN;
+  const avgRatio = safeAvgTokens / contextWindow;
+
+  if (avgRatio > 0.1) {
+    // 消息很大，缩小 chunk ratio 以避免超限
+    const reduction = Math.min(
+      avgRatio * 2,
+      BASE_CHUNK_RATIO - MIN_CHUNK_RATIO
+    );
+    return Math.max(MIN_CHUNK_RATIO, BASE_CHUNK_RATIO - reduction);
+  }
+  return BASE_CHUNK_RATIO; // 0.4
+}</code></pre>
+    </div>
+
+    <h3>渐进式回退</h3>
+
+    <p><code>summarizeWithFallback()</code> 实现了三级回退策略：</p>
+
+    <ol>
+      <li><strong>完整摘要</strong>：尝试对所有消息进行分块摘要</li>
+      <li><strong>部分摘要</strong>：如果失败，排除超大消息（单条 > 50% contextWindow），只摘要小消息</li>
+      <li><strong>元数据回退</strong>：如果连部分摘要也失败，返回 <code>"Context contained N messages (M oversized). Summary unavailable."</code></li>
+    </ol>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/compaction.ts &mdash; isOversizedForSummary()</span>
+      </div>
+      <pre><code class="language-typescript">// 单条消息 > 50% 上下文窗口就判定为"过大"
+export function isOversizedForSummary(
+  msg: AgentMessage,
+  contextWindow: number,
+): boolean {
+  const tokens = estimateCompactionMessageTokens(msg) * SAFETY_MARGIN;
+  return tokens > contextWindow * 0.5;
+}</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <span class="callout-label">安全设计</span>
+      <p><code>toolResult.details</code> 字段可能包含不受信任的大量数据。摘要函数在处理前会通过 <code>stripToolResultDetails()</code> 移除这些字段，确保：(1) 不会有不可信内容注入到 LLM 摘要 prompt 中，(2) Token 估算更准确。</p>
+    </div>
+  </section>
+
+  <!-- Section 6: Compaction Safeguard -->
+  <section id="safeguard">
+    <h2>Compaction Safeguard 扩展</h2>
+
+    <p>默认的 Pi Agent 摘要算法过于简单，可能丢失关键信息。OpenClaw 通过 <code>compaction-safeguard</code> 扩展（位于 <code>src/agents/pi-extensions/compaction-safeguard.ts</code>）覆写了整个压缩流程，提供结构化摘要和质量保障。</p>
+
+    <h3>结构化摘要格式</h3>
+
+    <p>Safeguard 强制生成包含以下 5 个必需段落的摘要：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>段落标题</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>## Decisions</code></td>
+            <td>已做出的决策及其理由</td>
+          </tr>
+          <tr>
+            <td><code>## Open TODOs</code></td>
+            <td>尚未完成的任务</td>
+          </tr>
+          <tr>
+            <td><code>## Constraints/Rules</code></td>
+            <td>当前约束和规则</td>
+          </tr>
+          <tr>
+            <td><code>## Pending user asks</code></td>
+            <td>用户尚未得到回答的请求</td>
+          </tr>
+          <tr>
+            <td><code>## Exact identifiers</code></td>
+            <td>需要精确保留的标识符（UUID, URL, 路径等）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Identifier Preservation 策略</h3>
+
+    <p>标识符保留支持三种策略（<code>AgentCompactionIdentifierPolicy</code>）：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>策略</th>
+            <th>行为</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>"strict"</code>（默认）</td>
+            <td>强制保留所有 opaque identifiers（UUID, hash, URL, 路径, IP:port 等）。Quality Guard 会检查缺失的标识符</td>
+          </tr>
+          <tr>
+            <td><code>"custom"</code></td>
+            <td>使用运营者自定义的保留指令</td>
+          </tr>
+          <tr>
+            <td><code>"off"</code></td>
+            <td>不强制保留标识符</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Quality Guard（质量审计）</h3>
+
+    <p>Safeguard 可选地启用质量审计，在生成摘要后检查：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-extensions/compaction-safeguard.ts &mdash; auditSummaryQuality()</span>
+      </div>
+      <pre><code class="language-typescript">function auditSummaryQuality(params: {
+  summary: string;
+  identifiers: string[];
+  latestAsk: string | null;
+  identifierPolicy?: "strict" | "off" | "custom";
+}): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // 1. 检查 5 个必需段落是否都存在
+  for (const section of REQUIRED_SUMMARY_SECTIONS) {
+    if (!lines.has(section)) reasons.push(`missing_section:${section}`);
+  }
+
+  // 2. 检查关键标识符是否保留（strict 模式）
+  if (enforceIdentifiers) {
+    const missing = identifiers.filter(
+      id => !summaryIncludesIdentifier(summary, id)
+    );
+    if (missing.length > 0) reasons.push(`missing_identifiers:...`);
+  }
+
+  // 3. 检查最近用户请求是否被反映（token overlap 检测）
+  if (!hasAskOverlap(summary, latestAsk)) {
+    reasons.push("latest_user_ask_not_reflected");
+  }
+
+  return { ok: reasons.length === 0, reasons };
+}</code></pre>
+    </div>
+
+    <p>如果审计失败，Safeguard 会重试（最多 <code>qualityGuardMaxRetries</code> 次，默认 1 次），在重试 prompt 中附带失败原因反馈。</p>
+
+    <h3>Recent Turns 保留</h3>
+
+    <p>Safeguard 支持保留最近 N 轮对话原文（默认 3 轮，最大 12 轮），不参与摘要，直接附加到摘要尾部的 <code>## Recent turns preserved verbatim</code> 段落中。这确保 Agent 对"刚才在做什么"有精确记忆。</p>
+
+    <h3>附加上下文</h3>
+
+    <p>摘要还会自动附加以下信息：</p>
+    <ul>
+      <li><strong>Tool Failures</strong>：最近的工具失败记录（最多 8 条），包括工具名、退出码、错误摘要</li>
+      <li><strong>File Operations</strong>：读取和修改的文件列表（<code>&lt;read-files&gt;</code> / <code>&lt;modified-files&gt;</code>）</li>
+      <li><strong>Workspace Critical Rules</strong>：从 <code>AGENTS.md</code> 中提取 "Session Startup" 和 "Red Lines" 段落（最多 2000 字符），确保关键规则在 compaction 后不丢失</li>
+    </ul>
+  </section>
+
+  <!-- Section 7: Memory Flush -->
+  <section id="memory-flush">
+    <h2>Memory Flush 与超时保护</h2>
+
+    <p>Compaction 过程中存在多个保护机制，防止数据丢失和资源泄漏。</p>
+
+    <h3>安全超时</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-runner/compaction-safety-timeout.ts</span>
+      </div>
+      <pre><code class="language-typescript">// Compaction 有 5 分钟的硬超时
+export const EMBEDDED_COMPACTION_TIMEOUT_MS = 300_000; // 5 min
+
+export async function compactWithSafetyTimeout&lt;T&gt;(
+  compact: () => Promise&lt;T&gt;,
+  timeoutMs = EMBEDDED_COMPACTION_TIMEOUT_MS,
+): Promise&lt;T&gt; {
+  return await withTimeout(() => compact(), timeoutMs, "Compaction");
+}</code></pre>
+    </div>
+
+    <h3>Pre-Compaction Snapshot</h3>
+
+    <p>当 Compaction 超时时，系统需要决定使用哪个消息快照来构建最终响应：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-runner/run/compaction-timeout.ts</span>
+      </div>
+      <pre><code class="language-typescript">export function selectCompactionTimeoutSnapshot(
+  params: SnapshotSelectionParams,
+): SnapshotSelection {
+  // 如果 Compaction 超时了，优先使用压缩前的快照
+  if (params.timedOutDuringCompaction && params.preCompactionSnapshot) {
+    return {
+      messagesSnapshot: params.preCompactionSnapshot,
+      sessionIdUsed: params.preCompactionSessionId,
+      source: "pre-compaction",  // 安全回退
+    };
+  }
+  // 否则使用当前（可能已压缩的）快照
+  return {
+    messagesSnapshot: params.currentSnapshot,
+    sessionIdUsed: params.currentSessionId,
+    source: "current",
+  };
+}</code></pre>
+    </div>
+
+    <h3>Compaction Retry 与 Promise 协调</h3>
+
+    <p>Overflow 触发的 Compaction 可能需要重试（<code>willRetry=true</code>）。subscribe 层通过一组 Promise 协调等待：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-subscribe.ts &mdash; Compaction 协调</span>
+      </div>
+      <pre><code class="language-typescript">// State 中的 compaction 追踪字段
+state = {
+  compactionInFlight: false,    // 是否有 compaction 正在进行
+  pendingCompactionRetry: 0,    // 待完成的 retry 计数
+  compactionRetryPromise: null, // 等待 retry 完成的 Promise
+};
+
+// auto_compaction_end handler 中：
+if (willRetry) {
+  ctx.noteCompactionRetry();      // pendingCompactionRetry++
+  ctx.resetForCompactionRetry();  // 重置 assistantTexts, toolMetas 等
+} else {
+  ctx.maybeResolveCompactionWait(); // resolve pending promise
+}
+
+// 外层 run 逻辑等待 compaction 完成
+await subscription.waitForCompactionRetry();</code></pre>
+    </div>
+
+    <div class="callout callout-warning">
+      <span class="callout-label">注意: Unsubscribe 安全</span>
+      <p>当 <code>unsubscribe()</code> 被调用时，如果 Compaction 仍在运行：(1) pending promise 会被 reject（使用 <code>AbortError</code>），避免调用者永远挂起；(2) <code>session.abortCompaction()</code> 被调用以取消进行中的 LLM 请求。这防止了资源泄漏和悬挂的 Promise。</p>
+    </div>
+
+    <h3>Session Write Lock</h3>
+
+    <p>Compaction 写入 session 文件前会获取写锁（<code>acquireSessionWriteLock()</code>），锁的最大持有时间根据 Compaction 超时时间推算：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-runner/compact.ts</span>
+      </div>
+      <pre><code class="language-typescript">const sessionLock = await acquireSessionWriteLock({
+  sessionFile: params.sessionFile,
+  maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
+    timeoutMs: EMBEDDED_COMPACTION_TIMEOUT_MS, // 300s
+  }),
+});</code></pre>
+    </div>
+
+    <h3>Block Reply Flush 保护</h3>
+
+    <p>在 <code>agent_end</code> 事件中，系统会先 flush 所有挂起的 Block Reply，再等待 Compaction 完成。这确保用户的回复不会被 Compaction 的长时间等待阻塞：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/pi-embedded-subscribe.handlers.lifecycle.ts</span>
+      </div>
+      <pre><code class="language-typescript">export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
+  // 1. 先 flush 所有缓冲的回复文本
+  ctx.flushBlockReplyBuffer();
+
+  // 2. 通知渠道层立即投递（不等 compaction）
+  void ctx.params.onBlockReplyFlush?.();
+
+  // 3. 最后处理 compaction wait
+  if (ctx.state.pendingCompactionRetry > 0) {
+    ctx.resolveCompactionRetry();
+  } else {
+    ctx.maybeResolveCompactionWait();
+  }
+}</code></pre>
+    </div>
+  </section>
+
+  <!-- Section 8: Full Lifecycle -->
+  <section id="lifecycle">
+    <h2>完整生命周期</h2>
+
+    <p>将 Streaming 和 Compaction 合并，一次 Agent Run 的完整生命周期如下：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>阶段</th>
+            <th>事件 / 动作</th>
+            <th>Streaming 行为</th>
+            <th>Compaction 行为</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1. 初始化</td>
+            <td><code>agent_start</code></td>
+            <td>创建订阅，初始化 state</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td>2. 首轮回复</td>
+            <td><code>message_start</code> -> <code>message_update</code>(n) -> <code>message_end</code></td>
+            <td>流式 Token -> Block Chunker -> Channel</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td>3. 工具调用</td>
+            <td><code>tool_execution_start</code> -> <code>tool_execution_end</code></td>
+            <td>Flush Block Reply, 发送工具摘要</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td>4. 后续回复</td>
+            <td><code>message_start</code> -> ... -> <code>message_end</code></td>
+            <td>继续流式投递</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td>5. Context 溢出</td>
+            <td><code>auto_compaction_start</code></td>
+            <td><code>compactionInFlight = true</code></td>
+            <td>开始结构化摘要生成</td>
+          </tr>
+          <tr>
+            <td>6. 摘要完成</td>
+            <td><code>auto_compaction_end</code></td>
+            <td>如 <code>willRetry</code>: 重置所有 streaming state</td>
+            <td>旧消息替换为摘要，可能 retry LLM 请求</td>
+          </tr>
+          <tr>
+            <td>7. 重试回复</td>
+            <td><code>message_start</code> -> ... (使用压缩后上下文)</td>
+            <td>全新一轮流式投递</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td>8. 结束</td>
+            <td><code>agent_end</code></td>
+            <td>Flush 剩余 buffer，解析 usage</td>
+            <td>Resolve compaction wait promise</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-key">
+      <span class="callout-label">关键点: Compaction 时的 State 重置</span>
+      <p>当 <code>auto_compaction_end</code> 带有 <code>willRetry=true</code> 时，<code>resetForCompactionRetry()</code> 会清空所有已收集的 assistant 文本、工具元数据、messaging tool 追踪等。这确保 Compaction 后 Agent 的重试回复以干净状态开始，不会与压缩前的残留数据混合。</p>
+    </div>
+
+    <h3>Hook 生命周期</h3>
+
+    <p>Compaction 的前后各触发两层 Hook：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>时机</th>
+            <th>Internal Hook</th>
+            <th>Plugin Hook</th>
+            <th>传递的元数据</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>压缩前</td>
+            <td><code>session:compact:before</code></td>
+            <td><code>before_compaction</code></td>
+            <td><code>messageCount</code>, <code>tokenCount</code>, <code>sessionId</code></td>
+          </tr>
+          <tr>
+            <td>压缩后</td>
+            <td><code>session:compact:after</code></td>
+            <td><code>after_compaction</code></td>
+            <td><code>messageCount</code>, <code>tokenCount</code>, <code>compactedCount</code>, <code>summaryLength</code>, <code>tokensBefore</code>, <code>tokensAfter</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4>Streaming 管线特点</h4>
+        <ul>
+          <li>事件驱动，8 种核心事件</li>
+          <li>有状态的 Tag 过滤（跨 chunk）</li>
+          <li>Fence-safe 智能分块</li>
+          <li>Messaging tool 去重</li>
+          <li>Reasoning stream 独立通道</li>
+          <li>Reply Directives 解析</li>
+        </ul>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4>Compaction 管线特点</h4>
+        <ul>
+          <li>分段-合并摘要算法</li>
+          <li>自适应分块比例（0.15 ~ 0.4）</li>
+          <li>三级回退策略</li>
+          <li>结构化 5 段摘要 + Quality Guard</li>
+          <li>Recent Turns 原文保留</li>
+          <li>5 分钟安全超时 + Session Write Lock</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; <a href="../index.html">返回总览</a></p>
+  </footer>
+</main>
+
+<script>
+  hljs.highlightAll();
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) currentId = section.id;
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

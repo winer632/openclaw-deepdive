@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>消息处理模式：5-Mode 调度策略 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的 5 种 QueueMode（steer / followup / collect / steer-backlog / interrupt）调度策略、决策流程与 Lane Queue 交互机制">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#problem">问题：Agent 忙时消息怎么办</a>
+  <a href="#five-modes">五种 QueueMode 一览</a>
+  <a href="#resolution">模式解析链路</a>
+  <a href="#decision">运行时决策引擎</a>
+  <a href="#drain">队列排空机制</a>
+  <a href="#lane-interaction">与 Lane Queue 的协作</a>
+  <a href="#config">配置与调优</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>消息处理模式<br>5-Mode 调度策略</h1>
+    <p class="doc-hero-subtitle">
+      当 Agent 正在处理一条消息时，新消息到达怎么办？OpenClaw 提供 5 种 QueueMode——steer、followup、collect、steer-backlog、interrupt——覆盖从"实时转向"到"批量合并"的全部场景。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/auto-reply/reply/queue/types.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: PROBLEM ==================== -->
+  <section id="problem" class="animate-in delay-1">
+    <h2>问题：Agent 忙时消息怎么办</h2>
+
+    <p>
+      在多渠道 AI 网关中，有一个频繁出现的核心问题：
+    </p>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        场景
+      </div>
+      <p>用户 Alice 发了一条消息 "帮我查一下天气"，Agent 开始执行工具调用。2 秒后 Alice 又发了 "算了，帮我写一封邮件"。此时正在运行的 Agent turn 还没完成——新消息该怎么处理？</p>
+    </div>
+
+    <p>
+      不同场景需要不同策略：
+    </p>
+
+    <ul>
+      <li><strong>实时对话</strong>（如语音）：新消息应该"打断"当前任务，立即执行。</li>
+      <li><strong>异步对话</strong>（如 Telegram）：新消息排队等待，前一轮完成后依次处理。</li>
+      <li><strong>多人群聊</strong>（如 Discord channel）：多条消息应合并为一个 prompt 批量处理，避免逐条回复。</li>
+      <li><strong>流式响应中</strong>：新消息如果是对当前话题的补充，应该"注入"到正在进行的推理流程中。</li>
+    </ul>
+
+    <p>
+      为了覆盖所有这些场景，OpenClaw 设计了 <code>QueueMode</code> 类型——5 种调度模式，每种对应一个策略。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue/types.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type QueueMode =
+  | "steer"          // 实时转向：注入到正在运行的 Agent
+  | "followup"       // 依次跟进：排队等待，逐条执行
+  | "collect"        // 批量合并：多条消息合并为一个 prompt
+  | "steer-backlog"  // 混合模式：先尝试 steer，不行再 followup
+  | "interrupt";     // 强制中断：清空队列，立即执行新消息
+
+export type QueueDropPolicy = "old" | "new" | "summarize";
+
+export type QueueSettings = {
+  mode: QueueMode;
+  debounceMs?: number;    // 防抖窗口（毫秒）
+  cap?: number;           // 队列容量上限
+  dropPolicy?: QueueDropPolicy;  // 溢出策略
+};</code></pre>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">类比</div>
+      <p>可以把 5 种 QueueMode 类比为<strong>餐厅的等位策略</strong>。<strong>steer</strong> 像加菜——直接加到正在做的菜里；<strong>followup</strong> 像叫号——依次排队等厨师做完上一桌；<strong>collect</strong> 像自助餐——多个订单合并成一盘端上来；<strong>steer-backlog</strong> 像"先试试加菜，不行就排号"；<strong>interrupt</strong> 像插队急单——当前的不做了，直接做新单。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: FIVE MODES ==================== -->
+  <section id="five-modes" class="animate-in delay-2">
+    <h2>五种 QueueMode 一览</h2>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Mode</th>
+            <th>Agent 空闲时</th>
+            <th>Agent 正在运行时</th>
+            <th>Agent 正在流式输出时</th>
+            <th>典型场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong><code>steer</code></strong></td>
+            <td>立即执行</td>
+            <td>排入 followup 队列</td>
+            <td>注入到正在运行的 Agent（<code>queueEmbeddedPiMessage</code>）</td>
+            <td>对话型交互，用户在 Agent 思考时补充信息</td>
+          </tr>
+          <tr>
+            <td><strong><code>followup</code></strong></td>
+            <td>立即执行</td>
+            <td>排入 followup 队列，等待当前 run 完成后依次执行</td>
+            <td>同左（排队）</td>
+            <td>异步消息通道（Telegram、WhatsApp）</td>
+          </tr>
+          <tr>
+            <td><strong><code>collect</code></strong></td>
+            <td>立即执行</td>
+            <td>排入 followup 队列，排空时<strong>合并为一个 prompt</strong></td>
+            <td>同左（合并排队）</td>
+            <td>群聊中多人连续发言，合并处理效率更高</td>
+          </tr>
+          <tr>
+            <td><strong><code>steer-backlog</code></strong></td>
+            <td>立即执行</td>
+            <td>排入 followup 队列</td>
+            <td>先尝试 steer 注入；如果注入成功且 shouldFollowup=true，仍排入 followup</td>
+            <td>需要同时响应流式中的补充和后续消息</td>
+          </tr>
+          <tr>
+            <td><strong><code>interrupt</code></strong></td>
+            <td>立即执行</td>
+            <td>清空队列 + 中止当前 run，立即执行新消息</td>
+            <td>同左（中止 + 立即执行）</td>
+            <td>语音通话模式，用户打断 Agent</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      <strong><code>collect</code></strong> 是全局默认模式。来看 <code>defaultQueueModeForChannel()</code> 的实现：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue/settings.ts</span>
+      </div>
+      <pre><code class="language-typescript">function defaultQueueModeForChannel(_channel?: string): QueueMode {
+  return "collect";
+}</code></pre>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        为什么默认是 collect
+      </div>
+      <p><code>collect</code> 是最保守也最安全的选择——多条消息合并为一个 prompt 批量处理，既避免了重复 Agent run 的资源浪费，也保证了上下文连贯性。它的行为是：在防抖窗口（默认 1000ms）内收集所有到达的消息，然后打包成 <code>"[Queued messages while agent was busy]"</code> 格式的 prompt 一次性交给 Agent。</p>
+    </div>
+
+    <p>
+      <strong><code>steer</code></strong> 模式的核心是 <code>queueEmbeddedPiMessage()</code>——当 Agent 正在流式输出时，新消息被直接注入到正在运行的 Pi Agent 的消息队列中，Agent 可以在下一个推理步骤"看到"这条新消息并调整输出方向。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/agent-runner.ts</span>
+      </div>
+      <pre><code class="language-typescript">// steer 模式：如果 Agent 正在流式输出，尝试注入消息
+if (shouldSteer && isStreaming) {
+  const steered = queueEmbeddedPiMessage(
+    followupRun.run.sessionId,
+    followupRun.prompt
+  );
+  if (steered && !shouldFollowup) {
+    await touchActiveSessionEntry();
+    typing.cleanup();
+    return undefined;  // 注入成功，无需额外处理
+  }
+}
+
+// interrupt 模式：清空队列 + 中止当前运行
+if (resolvedQueue.mode === "interrupt" && laneSize > 0) {
+  const cleared = clearCommandLane(sessionLaneKey);
+  const aborted = abortEmbeddedPiRun(sessionIdFinal);
+  logVerbose(`Interrupting ${sessionLaneKey} (cleared ${cleared}, aborted=${aborted})`);
+}</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: RESOLUTION ==================== -->
+  <section id="resolution" class="animate-in delay-1">
+    <h2>模式解析链路</h2>
+
+    <p>
+      QueueMode 的最终取值经过一个 4 级优先级解析链：
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">QueueMode 解析优先级链</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-exec" style="min-width: 110px;">
+          <strong>P0</strong><br>
+          内联指令<br>
+          <code>/queue steer</code>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">fallback</span>
+        </div>
+        <div class="flow-node flow-node-main" style="min-width: 110px;">
+          <strong>P1</strong><br>
+          Session 级别<br>
+          <code>sessionEntry.queueMode</code>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">fallback</span>
+        </div>
+        <div class="flow-node flow-node-session" style="min-width: 110px;">
+          <strong>P2</strong><br>
+          渠道级别<br>
+          <code>queue.byChannel.telegram</code>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">fallback</span>
+        </div>
+        <div class="flow-node" style="min-width: 110px; background: var(--card-bg); border: 1px solid var(--border); padding: 10px; border-radius: 8px; text-align: center;">
+          <strong>P3</strong><br>
+          全局配置<br>
+          <code>queue.mode</code>
+        </div>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue/settings.ts</span>
+      </div>
+      <pre><code class="language-typescript">export function resolveQueueSettings(params: ResolveQueueSettingsParams): QueueSettings {
+  const channelKey = params.channel?.trim().toLowerCase();
+  const queueCfg = params.cfg.messages?.queue;
+
+  // P2: 渠道级别覆盖（如 queue.byChannel.telegram = "steer"）
+  const providerModeRaw = channelKey && queueCfg?.byChannel
+    ? (queueCfg.byChannel as Record&lt;string, string | undefined&gt;)[channelKey]
+    : undefined;
+
+  // P0 &gt; P1 &gt; P2 &gt; P3 &gt; 默认值
+  const resolvedMode =
+    params.inlineMode ??                            // P0: 内联指令
+    normalizeQueueMode(params.sessionEntry?.queueMode) ?? // P1: 会话级别
+    normalizeQueueMode(providerModeRaw) ??           // P2: 渠道级别
+    normalizeQueueMode(queueCfg?.mode) ??            // P3: 全局配置
+    defaultQueueModeForChannel(channelKey);           // 默认: "collect"
+
+  // debounce 也有类似的优先级链
+  const debounceRaw =
+    params.inlineOptions?.debounceMs ??
+    params.sessionEntry?.queueDebounceMs ??
+    resolveChannelDebounce(queueCfg?.debounceMsByChannel, channelKey) ??
+    resolvePluginDebounce(channelKey) ??  // 插件可声明默认 debounce
+    queueCfg?.debounceMs ??
+    DEFAULT_QUEUE_DEBOUNCE_MS;            // 1000ms
+
+  return {
+    mode: resolvedMode,
+    debounceMs: Math.max(0, debounceRaw),
+    cap: capRaw ?? DEFAULT_QUEUE_CAP,     // 20
+    dropPolicy: dropRaw ?? "summarize",
+  };
+}</code></pre>
+    </div>
+
+    <p>
+      <code>normalizeQueueMode()</code> 负责解析用户输入的各种变体——<code>"queue"</code> 会被标准化为 <code>"steer"</code>，<code>"coalesce"</code> 标准化为 <code>"collect"</code>，<code>"abort"</code> 标准化为 <code>"interrupt"</code>：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue/normalize.ts</span>
+      </div>
+      <pre><code class="language-typescript">export function normalizeQueueMode(raw?: string): QueueMode | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw.trim().toLowerCase();
+  if (cleaned === "queue" || cleaned === "queued") return "steer";
+  if (cleaned === "interrupt" || cleaned === "interrupts" || cleaned === "abort") return "interrupt";
+  if (cleaned === "steer" || cleaned === "steering") return "steer";
+  if (cleaned === "followup" || cleaned === "follow-ups") return "followup";
+  if (cleaned === "collect" || cleaned === "coalesce") return "collect";
+  if (cleaned === "steer+backlog" || cleaned === "steer-backlog") return "steer-backlog";
+  return undefined;
+}</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: DECISION ==================== -->
+  <section id="decision" class="animate-in delay-1">
+    <h2>运行时决策引擎</h2>
+
+    <p>
+      当一条消息到达时，系统要做一个关键决策：<strong>立即执行？排队等待？还是直接丢弃？</strong>
+      这个决策由 <code>resolveActiveRunQueueAction()</code> 完成：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue-policy.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type ActiveRunQueueAction = "run-now" | "enqueue-followup" | "drop";
+
+export function resolveActiveRunQueueAction(params: {
+  isActive: boolean;       // 当前会话是否有 Agent 在运行
+  isHeartbeat: boolean;    // 是否为心跳消息
+  shouldFollowup: boolean; // 模式是否支持 followup
+  queueMode: QueueSettings["mode"];
+}): ActiveRunQueueAction {
+  // Case 1: 没有活跃的 Agent run -> 立即执行
+  if (!params.isActive) {
+    return "run-now";
+  }
+  // Case 2: 心跳消息在 Agent 忙时直接丢弃
+  if (params.isHeartbeat) {
+    return "drop";
+  }
+  // Case 3: followup/collect/steer-backlog/steer 模式 -> 排队
+  if (params.shouldFollowup || params.queueMode === "steer") {
+    return "enqueue-followup";
+  }
+  // Case 4: interrupt 模式 -> 立即执行（队列已在上游清空）
+  return "run-now";
+}</code></pre>
+    </div>
+
+    <p>
+      在 <code>agent-runner.ts</code> 中，<code>shouldSteer</code> 和 <code>shouldFollowup</code> 两个布尔值由 QueueMode 推导出来，驱动后续的分支逻辑：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/get-reply-run.ts</span>
+      </div>
+      <pre><code class="language-typescript">// 是否应该尝试 steer（实时注入）
+const shouldSteer =
+  resolvedQueue.mode === "steer" ||
+  resolvedQueue.mode === "steer-backlog";
+
+// 是否应该支持 followup 队列（排队等待）
+const shouldFollowup =
+  resolvedQueue.mode === "followup" ||
+  resolvedQueue.mode === "collect" ||
+  resolvedQueue.mode === "steer-backlog";</code></pre>
+    </div>
+
+    <p>
+      可以看到 <code>steer-backlog</code> 模式的独特之处——它同时设置 <code>shouldSteer = true</code> 和 <code>shouldFollowup = true</code>，
+      实现了"先试 steer，不行再 followup"的混合策略。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">消息到达时的决策流程</div>
+      <div class="flow-container" style="flex-direction: column; gap: 8px; align-items: center;">
+        <div class="flow-node flow-node-main" style="width: 60%;">
+          消息到达 &rarr; resolveQueueSettings()
+        </div>
+        <div class="flow-arrow" style="justify-content: center;">
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="width: 60%; background: var(--card-bg); border: 1px solid var(--border); padding: 10px; border-radius: 8px; text-align: center;">
+          Agent 是否活跃？（isActive）
+        </div>
+        <div style="display: flex; gap: 24px; width: 80%; justify-content: center;">
+          <div style="text-align: center;">
+            <div style="color: var(--success); margin-bottom: 4px;">NO</div>
+            <div class="flow-node flow-node-session" style="min-width: 100px;">
+              <strong>run-now</strong><br>
+              立即执行
+            </div>
+          </div>
+          <div style="text-align: center;">
+            <div style="color: var(--warning); margin-bottom: 4px;">YES + steer + streaming</div>
+            <div class="flow-node flow-node-exec" style="min-width: 100px;">
+              <strong>steer</strong><br>
+              注入消息到 Agent
+            </div>
+          </div>
+          <div style="text-align: center;">
+            <div style="color: var(--info); margin-bottom: 4px;">YES + followup</div>
+            <div class="flow-node flow-node-main" style="min-width: 100px;">
+              <strong>enqueue</strong><br>
+              排入 followup 队列
+            </div>
+          </div>
+          <div style="text-align: center;">
+            <div style="color: var(--error); margin-bottom: 4px;">YES + interrupt</div>
+            <div class="flow-node" style="min-width: 100px; background: var(--card-bg); border: 1px solid var(--error); padding: 10px; border-radius: 8px; text-align: center;">
+              <strong>abort + run</strong><br>
+              中止 + 立即执行
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: DRAIN ==================== -->
+  <section id="drain" class="animate-in delay-1">
+    <h2>队列排空机制</h2>
+
+    <p>
+      当 Agent 完成一次 run 后，系统检查 followup 队列中是否有等待的消息。如果有，就启动<strong>排空循环（drain loop）</strong>。
+      排空行为取决于当前的 QueueMode：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Mode</th>
+            <th>排空行为</th>
+            <th>Prompt 格式</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>followup</code></td>
+            <td>逐条取出，每条独立执行一次 Agent run</td>
+            <td>原始消息文本</td>
+          </tr>
+          <tr>
+            <td><code>collect</code></td>
+            <td>一次取出全部，合并为一个 prompt</td>
+            <td><code>[Queued messages while agent was busy]\n---\nQueued #1\n...\nQueued #2\n...</code></td>
+          </tr>
+          <tr>
+            <td><code>steer</code></td>
+            <td>同 followup（steer 只影响流式阶段）</td>
+            <td>原始消息文本</td>
+          </tr>
+          <tr>
+            <td><code>steer-backlog</code></td>
+            <td>同 followup</td>
+            <td>原始消息文本</td>
+          </tr>
+          <tr>
+            <td><code>interrupt</code></td>
+            <td>无排空（队列在 interrupt 时已被清空）</td>
+            <td>N/A</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      <code>collect</code> 模式的排空逻辑最复杂——它需要判断是否有<strong>跨渠道消息</strong>（cross-channel items）。如果队列中的消息来自不同渠道或不同会话目标，就必须逐条处理，避免把不同上下文的消息合并到一个 prompt 中：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue/drain.ts</span>
+      </div>
+      <pre><code class="language-typescript">if (queue.mode === "collect") {
+  // 检查是否跨渠道/跨目标
+  const isCrossChannel = hasCrossChannelItems(queue.items, resolveCrossChannelKey);
+
+  const collectDrainResult = await drainCollectQueueStep({
+    collectState,
+    isCrossChannel,  // 跨渠道时回退为逐条处理
+    items: queue.items,
+    run: runFollowup,
+  });
+  if (collectDrainResult === "drained") continue;
+
+  // 合并所有消息为一个 prompt
+  const prompt = buildCollectPrompt({
+    title: "[Queued messages while agent was busy]",
+    items,
+    summary,
+    renderItem: (item, idx) =&gt;
+      `---\nQueued #${idx + 1}\n${item.prompt}`.trim(),
+  });
+  await runFollowup({ prompt, run, enqueuedAt: Date.now(), ...routing });
+}</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+        防抖窗口
+      </div>
+      <p>在排空之前，系统会先等待 <code>debounceMs</code>（默认 1000ms）的防抖窗口。这意味着用户连续快速发送的多条消息会被合并到同一批次中处理。防抖值可以通过 <code>messages.queue.debounceMs</code> 全局设置，也可以通过 <code>messages.queue.debounceMsByChannel</code> 按渠道单独调整。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: LANE INTERACTION ==================== -->
+  <section id="lane-interaction" class="animate-in delay-1">
+    <h2>与 Lane Queue 的协作</h2>
+
+    <p>
+      QueueMode 系统和 Lane Queue 是两个不同层次的并发控制机制，它们紧密协作：
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4>Lane Queue（底层）</h4>
+        <ul>
+          <li>保证<strong>同一会话同一时间只有一个 Agent run</strong></li>
+          <li>以 sessionKey 为 lane key</li>
+          <li>纯 FIFO 排队，不关心消息语义</li>
+          <li>位于 <code>src/process/command-queue.ts</code></li>
+        </ul>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4>QueueMode（上层）</h4>
+        <ul>
+          <li>决定<strong>如何处理 Agent 忙时到达的新消息</strong></li>
+          <li>steer / followup / collect / interrupt 策略</li>
+          <li>理解消息语义（合并、注入、丢弃）</li>
+          <li>位于 <code>src/auto-reply/reply/queue/</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <div class="diagram-title">两层排队的协作关系</div>
+      <div class="flow-container" style="flex-direction: column; gap: 8px; align-items: center;">
+        <div class="flow-node flow-node-session" style="width: 70%;">
+          <strong>消息到达</strong> &rarr; QueueMode 决策（steer / followup / collect / interrupt）
+        </div>
+        <div class="flow-arrow" style="justify-content: center;">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">enqueue 或 run-now</span>
+        </div>
+        <div class="flow-node flow-node-main" style="width: 70%;">
+          <strong>Followup Queue</strong>（按 sessionKey 分桶的内存队列）<br>
+          debounce 等待 &rarr; 排空 &rarr; 提交到 Lane Queue
+        </div>
+        <div class="flow-arrow" style="justify-content: center;">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">submit</span>
+        </div>
+        <div class="flow-node flow-node-exec" style="width: 70%;">
+          <strong>Lane Queue</strong>（保证 session 级别的串行执行）<br>
+          同一 sessionKey 同一时间只有一个 Agent run
+        </div>
+      </div>
+    </div>
+
+    <p>
+      具体来说，Followup Queue 的数据结构如下：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/queue/state.ts</span>
+      </div>
+      <pre><code class="language-typescript">export type FollowupQueueState = {
+  items: FollowupRun[];       // 等待执行的消息列表
+  draining: boolean;           // 是否正在排空
+  lastEnqueuedAt: number;      // 最近入队时间（用于防抖）
+  mode: QueueMode;             // 当前模式
+  debounceMs: number;          // 防抖窗口
+  cap: number;                 // 容量上限
+  dropPolicy: QueueDropPolicy; // 溢出策略
+  droppedCount: number;        // 已丢弃消息数
+  summaryLines: string[];      // 丢弃消息的摘要
+  lastRun?: FollowupRun["run"]; // 最近的 run 参数（用于合并）
+};
+
+export const DEFAULT_QUEUE_DEBOUNCE_MS = 1000;
+export const DEFAULT_QUEUE_CAP = 20;
+export const DEFAULT_QUEUE_DROP: QueueDropPolicy = "summarize";
+
+// 全局 Map：sessionKey -> FollowupQueueState
+export const FOLLOWUP_QUEUES = new Map&lt;string, FollowupQueueState&gt;();</code></pre>
+    </div>
+
+    <p>
+      当队列容量（<code>cap</code>，默认 20）被用满时，<code>dropPolicy</code> 决定如何处理溢出：
+    </p>
+    <ul>
+      <li><code>"old"</code>：丢弃最旧的消息</li>
+      <li><code>"new"</code>：丢弃最新的消息（即拒绝入队）</li>
+      <li><code>"summarize"</code>（默认）：丢弃最旧的消息，但保留其摘要行，排空时将摘要注入到 prompt 中</li>
+    </ul>
+  </section>
+
+
+  <!-- ==================== SECTION: CONFIG ==================== -->
+  <section id="config" class="animate-in delay-1">
+    <h2>配置与调优</h2>
+
+    <p>
+      QueueMode 系统的所有参数都可以通过 <code>openclaw.yaml</code> 配置文件调整：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">yaml</span>
+        <span class="code-block-file">~/.openclaw/config.yaml</span>
+      </div>
+      <pre><code class="language-yaml">messages:
+  queue:
+    # 全局默认模式（默认: collect）
+    mode: collect
+
+    # 按渠道覆盖模式
+    byChannel:
+      telegram: steer        # Telegram 用 steer（支持流式注入）
+      discord: collect        # Discord 用 collect（群聊合并）
+      signal: followup        # Signal 逐条处理
+      webchat: interrupt      # 语音通话用 interrupt
+
+    # 全局防抖窗口（默认: 1000ms）
+    debounceMs: 1000
+
+    # 按渠道覆盖防抖
+    debounceMsByChannel:
+      telegram: 500           # Telegram 更快响应
+      discord: 2000           # Discord 群聊多等一会儿
+
+    # 队列容量上限（默认: 20）
+    cap: 20
+
+    # 溢出策略（默认: summarize）
+    drop: summarize</code></pre>
+    </div>
+
+    <p>
+      除了配置文件，用户还可以通过<strong>内联指令</strong>在消息中临时切换模式：
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>指令</th>
+            <th>效果</th>
+            <th>作用范围</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>/queue steer</code></td><td>切换到 steer 模式</td><td>当前会话持久</td></tr>
+          <tr><td><code>/queue collect</code></td><td>切换到 collect 模式</td><td>当前会话持久</td></tr>
+          <tr><td><code>/queue followup</code></td><td>切换到 followup 模式</td><td>当前会话持久</td></tr>
+          <tr><td><code>/queue interrupt</code></td><td>切换到 interrupt 模式</td><td>当前会话持久</td></tr>
+          <tr><td><code>/queue steer-backlog</code></td><td>切换到 steer-backlog 模式</td><td>当前会话持久</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      内联指令会写入 <code>sessionEntry.queueMode</code>，在解析优先级链中位于 P1（仅次于 P0 的单条消息覆盖），优先于渠道级别和全局配置。
+    </p>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        插件默认 debounce
+      </div>
+      <p>渠道插件可以通过 <code>ChannelPlugin.defaults.queue.debounceMs</code> 声明自己的默认防抖值。这在解析链中位于渠道配置和全局配置之间——如果用户没有显式设置，就使用插件的推荐值。例如，一个 webhook 渠道可能推荐较长的 debounce（如 3000ms）来应对批量推送。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source" class="animate-in delay-1">
+    <h2>源码索引</h2>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>src/auto-reply/reply/queue/types.ts</code></td><td>QueueMode、QueueSettings、FollowupRun 类型定义</td></tr>
+          <tr><td><code>src/auto-reply/reply/queue/normalize.ts</code></td><td>QueueMode 字符串标准化（"queue" &rarr; "steer" 等）</td></tr>
+          <tr><td><code>src/auto-reply/reply/queue/settings.ts</code></td><td>4 级优先级解析链（resolveQueueSettings）</td></tr>
+          <tr><td><code>src/auto-reply/reply/queue-policy.ts</code></td><td>运行时决策引擎（run-now / enqueue / drop）</td></tr>
+          <tr><td><code>src/auto-reply/reply/queue/enqueue.ts</code></td><td>入队逻辑 + 去重 + drop policy</td></tr>
+          <tr><td><code>src/auto-reply/reply/queue/drain.ts</code></td><td>排空循环（collect 合并 / followup 逐条）</td></tr>
+          <tr><td><code>src/auto-reply/reply/queue/state.ts</code></td><td>FollowupQueueState 数据结构 + FOLLOWUP_QUEUES Map</td></tr>
+          <tr><td><code>src/auto-reply/reply/agent-runner.ts</code></td><td>Agent 运行入口（steer 注入 / interrupt 中止）</td></tr>
+          <tr><td><code>src/auto-reply/reply/get-reply-run.ts</code></td><td>shouldSteer / shouldFollowup 推导 + followupRun 构建</td></tr>
+          <tr><td><code>src/config/types.queue.ts</code></td><td>配置文件中的 QueueMode 类型 + byChannel 覆盖</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; <a href="../index.html">返回总览</a></p>
+  </footer>
+</main>
+
+<script>
+  hljs.highlightAll();
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) currentId = section.id;
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

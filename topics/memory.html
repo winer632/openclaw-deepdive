@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Memory 持久记忆系统：Markdown + SQLite 混合存储与双路检索架构 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw Memory 持久记忆系统：Markdown 文件存储、SQLite 索引、Vector + FTS5 双路检索、5 级 Embedding Provider 链、Memory Flush 生命周期">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#overview">存储架构总览</a>
+  <a href="#indexing">索引管线</a>
+  <a href="#embedding">Embedding Provider 链</a>
+  <a href="#hybrid-search">双路混合搜索</a>
+  <a href="#hybrid-merge">Hybrid 融合与高级排序</a>
+  <a href="#memory-flush">Memory Flush 生命周期</a>
+  <a href="#agent-tools">Agent 工具接口</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Memory<br>持久记忆系统</h1>
+    <p class="doc-hero-subtitle">
+      以 Markdown 文件为事实源、SQLite 为索引层的持久记忆架构。Vector + FTS5 双路混合搜索，5 级 Embedding Provider 自动选择链，Memory Flush 预压缩持久化 &mdash; 让 Agent 拥有跨会话的长期记忆。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/memory/manager.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: OVERVIEW ==================== -->
+  <section id="overview">
+    <h2>存储架构总览</h2>
+
+    <div class="analogy">
+      <span class="analogy-label">类比</span>
+      把 Memory 系统想象成一座<strong>个人图书馆</strong>：Markdown 文件是书架上的笔记本（人类可读、可直接编辑）；SQLite 数据库是馆员的索引卡片柜（结构化、可高速检索）；Embedding 向量是每一页内容的"语义指纹"，让馆员无需逐页翻阅就能找到最相关的段落。
+    </div>
+
+    <p>
+      OpenClaw 的记忆系统采用了<strong>双层存储架构</strong>&mdash;Markdown 文件是用户可读、可编辑的事实源（source of truth），
+      SQLite 数据库则是纯粹的索引加速层。这个设计决策让记忆数据始终保持透明和可移植。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">Memory 双层存储架构</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>事实源：Markdown 文件</strong><br>
+          <span style="font-size:0.8rem;">MEMORY.md + memory/*.md</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">分块 + 嵌入 + 索引</span>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>索引层：SQLite 数据库</strong><br>
+          <span style="font-size:0.8rem;">chunks 表 + chunks_vec + chunks_fts</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">Agent 调用 memory_search</span>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>搜索结果</strong><br>
+          <span style="font-size:0.8rem;">path + startLine + score + snippet</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>数据源（Sources）</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>数据源</th><th>路径</th><th>内容</th><th>默认状态</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>memory</code></td>
+            <td>MEMORY.md + memory/*.md</td>
+            <td>用户手动编写的持久知识：偏好、决策、TODO、笔记</td>
+            <td style="color:var(--accent-3);font-weight:600;">启用</td>
+          </tr>
+          <tr>
+            <td><code>sessions</code></td>
+            <td>sessions/*.jsonl 转录文件</td>
+            <td>对话历史转录，作为可搜索的记忆补充</td>
+            <td style="color:var(--accent);font-weight:600;">实验性（需手动启用）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>SQLite Schema</h3>
+
+    <p>索引数据库包含四张核心表和两个虚拟/扩展表：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">SQL</span>
+        <span class="code-block-file">src/memory/memory-schema.ts &mdash; 核心表结构</span>
+      </div>
+      <pre><code class="language-typescript">// files 表 — 跟踪每个 Markdown 文件的哈希和修改时间
+CREATE TABLE files (
+  path TEXT PRIMARY KEY,
+  source TEXT NOT NULL DEFAULT 'memory',  -- 'memory' | 'sessions'
+  hash TEXT NOT NULL,
+  mtime INTEGER NOT NULL,
+  size INTEGER NOT NULL
+);
+
+// chunks 表 — 存储分块后的文本和嵌入向量
+CREATE TABLE chunks (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'memory',
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  model TEXT NOT NULL,        -- 生成嵌入时使用的模型
+  text TEXT NOT NULL,         -- 分块文本内容
+  embedding TEXT NOT NULL,    -- 向量嵌入（JSON 数组）
+  updated_at INTEGER NOT NULL
+);
+
+// embedding_cache — 避免对相同文本重复调用 Embedding API
+// chunks_fts — FTS5 虚拟表，全文关键词搜索（BM25 排名）
+// chunks_vec — sqlite-vec 扩展表，向量近邻搜索</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">设计原则</div>
+      <p><strong>Markdown 文件永远是事实源</strong>&mdash;SQLite 数据库可以随时删除并重建。用户直接编辑 MEMORY.md 即可更新记忆，无需学习任何 API。这让记忆数据天然具备<strong>可读性</strong>（纯文本）、<strong>可版本控制</strong>（Git 友好）和<strong>可迁移性</strong>（复制文件即可）。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: INDEXING ==================== -->
+  <section id="indexing">
+    <h2>索引管线</h2>
+
+    <p>
+      当 Markdown 文件发生变更时，索引管线会将文件内容切分为小块（chunks），为每个块生成嵌入向量，
+      然后写入 SQLite 数据库。整个过程是<strong>增量式</strong>的&mdash;只有变更的文件会被重新索引。
+    </p>
+
+    <h3>分块策略：400-token + 80-token 滑动窗口</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/memory-search.ts &mdash; 默认分块参数</span>
+      </div>
+      <pre><code class="language-typescript">const DEFAULT_CHUNK_TOKENS = 400;     // 每个块最大 400 tokens
+const DEFAULT_CHUNK_OVERLAP = 80;     // 相邻块重叠 80 tokens（滑动窗口）</code></pre>
+    </div>
+
+    <p>
+      Markdown 文件按行遍历，当累积文本超过 token 限制时产生一个新块。相邻块之间有
+      重叠区域，确保跨越块边界的信息不会丢失。如果某个块超过了 Embedding 模型的输入上限，
+      <code>enforceEmbeddingMaxInputTokens</code> 会以 UTF-8 字节长度为保守上界进行二次分割。
+    </p>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">UTF-8 字节估算</div>
+      <p>使用 UTF-8 字节数作为 token 数的保守估计（每个 token 至少占 1 字节），避免了对不同分词器的硬依赖，同时保证不会超过模型的输入限制。二次分割还会检测 surrogate pair 避免在 Unicode 代理对中间切断。</p>
+    </div>
+
+    <h3>同步触发机制</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>触发方式</th><th>配置项</th><th>默认值</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>文件监听</td>
+            <td><code>sync.watch</code></td>
+            <td><code>true</code></td>
+            <td>使用 chokidar 监听 memory/ 目录变更，防抖 1.5 秒后同步</td>
+          </tr>
+          <tr>
+            <td>搜索时同步</td>
+            <td><code>sync.onSearch</code></td>
+            <td><code>true</code></td>
+            <td>每次 memory_search 调用前检查并同步脏数据</td>
+          </tr>
+          <tr>
+            <td>会话启动</td>
+            <td><code>sync.onSessionStart</code></td>
+            <td><code>true</code></td>
+            <td>新会话开始时触发一次同步</td>
+          </tr>
+          <tr>
+            <td>定时同步</td>
+            <td><code>sync.intervalMinutes</code></td>
+            <td><code>0</code>（关闭）</td>
+            <td>可配置为每 N 分钟自动同步</td>
+          </tr>
+          <tr>
+            <td>会话转录增量</td>
+            <td><code>sync.sessions.deltaBytes</code></td>
+            <td><code>100KB</code></td>
+            <td>Session 源累积变更超过阈值时触发同步</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">增量索引</div>
+      <p>同步过程是增量式的：每个文件通过 <code>hash + mtime</code> 跟踪变更状态。嵌入缓存表 <code>embedding_cache</code> 以 <code>(provider, model, provider_key, hash)</code> 为联合主键，即使全量重建索引时也能复用已有的向量。只读数据库异常时还有自动恢复机制（重新打开连接并重试）。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: EMBEDDING ==================== -->
+  <section id="embedding">
+    <h2>Embedding Provider 链</h2>
+
+    <p>
+      将文本转换为向量需要 Embedding Provider。OpenClaw 支持 6 种 Provider，通过一条<strong>5 级自动选择链</strong>
+      依次尝试，直到找到可用的 Provider 或全部降级为 FTS-only。
+    </p>
+
+    <h3>Provider 一览</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>Provider</th><th>默认模型</th><th>最大输入 Token</th><th>类型</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Local</td><td><code>embeddinggemma-300m-qat-Q8_0.gguf</code></td><td>2,048</td><td>本地进程 (node-llama-cpp)</td></tr>
+          <tr><td>OpenAI</td><td><code>text-embedding-3-small</code></td><td>8,192</td><td>远程 API</td></tr>
+          <tr><td>Gemini</td><td><code>gemini-embedding-001</code></td><td>2,048</td><td>远程 API</td></tr>
+          <tr><td>Voyage</td><td><code>voyage-4-large</code></td><td>32,000</td><td>远程 API</td></tr>
+          <tr><td>Mistral</td><td><code>mistral-embed</code></td><td>8,192</td><td>远程 API</td></tr>
+          <tr><td>Ollama</td><td><code>nomic-embed-text</code></td><td>8,192</td><td>本地 API 服务</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Auto 模式选择链</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">Provider Auto-Selection Chain（provider: "auto"）</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session" style="max-width:360px;">
+          <strong>1. Local 本地模型</strong><br>
+          <span style="font-size:0.8rem;">仅当 local.modelPath 指向本地已有文件时尝试</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">失败则继续</span>
+        </div>
+        <div class="flow-node flow-node-main" style="max-width:360px;">
+          <strong>2. 远程 Provider 依次尝试</strong><br>
+          <span style="font-size:0.8rem;">OpenAI &rarr; Gemini &rarr; Voyage &rarr; Mistral</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">全部缺少 API Key</span>
+        </div>
+        <div class="flow-node flow-node-exec" style="max-width:360px;">
+          <strong>3. FTS-only 降级</strong><br>
+          <span style="font-size:0.8rem;">provider = null，仅使用 FTS5 关键词搜索</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/memory/embeddings.ts &mdash; auto 模式核心逻辑</span>
+      </div>
+      <pre><code class="language-typescript">if (requestedProvider === "auto") {
+  // 1. 尝试本地模型（仅当 GGUF 文件存在时）
+  if (canAutoSelectLocal(options)) {
+    try { return await createProvider("local"); }
+    catch (err) { localError = formatLocalSetupError(err); }
+  }
+  // 2. 依次尝试远程 Provider
+  for (const provider of REMOTE_EMBEDDING_PROVIDER_IDS) {
+    try {
+      const result = await createProvider(provider);
+      return { ...result, requestedProvider };
+    } catch (err) {
+      if (isMissingApiKeyError(err)) {
+        missingKeyErrors.push(message);
+        continue;  // API Key 缺失 → 跳过，尝试下一个
+      }
+      throw err;   // 网络错误 → 致命，立即中止
+    }
+  }
+  // 3. 全部失败 → 返回 null provider（FTS-only 降级）
+  return { provider: null, requestedProvider,
+           providerUnavailableReason: reason };
+}</code></pre>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">Ollama 排除</div>
+      <p>Ollama 被有意排除在 <code>auto</code> 模式之外（<code>REMOTE_EMBEDDING_PROVIDER_IDS</code> 不包含 <code>"ollama"</code>），因为 auto 模式不应隐式假设本地有 Ollama 实例运行。需要使用 Ollama 时必须显式设置 <code>provider: "ollama"</code>。</p>
+    </div>
+
+    <h3>Fallback 与向量归一化</h3>
+    <p>当显式指定的 Provider 失败时，可通过 <code>fallback</code> 配置备用 Provider（如 <code>provider: "openai", fallback: "local"</code>）。所有 Embedding 结果存储前都经过 <code>sanitizeAndNormalizeEmbedding</code>：将非有限数替换为 0 并做 L2 归一化，确保不同 Provider 的向量在余弦相似度计算中具有可比性。</p>
+  </section>
+
+
+  <!-- ==================== SECTION: HYBRID SEARCH ==================== -->
+  <section id="hybrid-search">
+    <h2>双路混合搜索</h2>
+
+    <p>
+      Memory 系统的搜索引擎由 <code>manager-search.ts</code> 实现，包含两条独立的检索路径，通过加权融合产生最终结果。
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4>Vector 语义检索</h4>
+        <ul>
+          <li>基于 <code>sqlite-vec</code> 扩展的 <code>vec_distance_cosine</code> 函数</li>
+          <li>适合模糊语义查询，如"之前讨论过的 API 设计方案"</li>
+          <li>需要 Embedding Provider 可用</li>
+          <li>退化方案：无 sqlite-vec 时用纯 JS 余弦相似度逐条计算</li>
+        </ul>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4>FTS5 关键词检索</h4>
+        <ul>
+          <li>基于 SQLite FTS5 的 BM25 算法排名</li>
+          <li>适合精确关键词匹配，如人名、日期、项目代号</li>
+          <li>不依赖任何外部服务或 API</li>
+          <li>当 Embedding 完全不可用时，自动切换为 FTS-only 模式</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/memory/manager-search.ts &mdash; Vector 检索核心 SQL</span>
+      </div>
+      <pre><code class="language-typescript">// sqlite-vec 方案：在 C 扩展中直接计算余弦距离
+const rows = params.db.prepare(
+  `SELECT c.id, c.path, c.start_line, c.end_line, c.text,
+          c.source,
+          vec_distance_cosine(v.embedding, ?) AS dist
+     FROM ${params.vectorTable} v
+     JOIN chunks c ON c.id = v.id
+    WHERE c.model = ?${params.sourceFilterVec.sql}
+    ORDER BY dist ASC
+    LIMIT ?`
+).all(vectorToBlob(params.queryVec), params.providerModel, ...);
+
+// score = 1 - dist（距离越小，相似度越高）
+return rows.map(row =&gt; ({ ...row, score: 1 - row.dist }));</code></pre>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">优雅降级</div>
+      <p>当 <code>sqlite-vec</code> 扩展不可用时，系统回退到纯 JavaScript 实现：从 <code>chunks</code> 表加载所有向量文本，用 <code>cosineSimilarity</code> 逐一计算相似度。性能较低但功能等价，确保了跨平台兼容性。当 <code>status()</code> 返回 <code>vector.available: false</code> 时即表示使用了 JS 回退方案。</p>
+    </div>
+
+    <h3>FTS-only 降级模式</h3>
+    <p>当没有任何 Embedding Provider 可用时（<code>provider === null</code>），系统进入 FTS-only 模式。此时会先用 <code>extractKeywords()</code> 从自然语言查询中提取关键词（如 "that thing we discussed about the API" 提取为 ["discussed", "API"]），分别搜索后合并去重，保留最高分。<code>status().custom.searchMode</code> 会返回 <code>"fts-only"</code>。</p>
+  </section>
+
+
+  <!-- ==================== SECTION: HYBRID MERGE ==================== -->
+  <section id="hybrid-merge">
+    <h2>Hybrid 融合与高级排序</h2>
+
+    <p>当两条检索路径都返回结果时，<code>mergeHybridResults</code> 将它们融合为一个统一的排序列表。</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Hybrid 融合公式</div>
+      <pre style="text-align:center; font-family: var(--font-code); color: var(--fg); padding: var(--space-4); font-size: var(--size-base);">
+  finalScore = vectorWeight * vectorScore + textWeight * textScore
+  默认: finalScore = 0.7 * cosine_sim + 0.3 * bm25_normalized
+      </pre>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>参数</th><th>默认值</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>hybrid.vectorWeight</code></td><td><code>0.7</code></td><td>向量相似度在融合评分中的权重</td></tr>
+          <tr><td><code>hybrid.textWeight</code></td><td><code>0.3</code></td><td>关键词匹配在融合评分中的权重</td></tr>
+          <tr><td><code>query.maxResults</code></td><td><code>6</code></td><td>返回的最大结果数</td></tr>
+          <tr><td><code>query.minScore</code></td><td><code>0.35</code></td><td>最低相关性阈值</td></tr>
+          <tr><td><code>candidateMultiplier</code></td><td><code>4</code></td><td>每条路径返回 maxResults * 4 个候选再合并</td></tr>
+          <tr><td><code>mmr.enabled</code></td><td><code>false</code></td><td>MMR 多样性重排序</td></tr>
+          <tr><td><code>mmr.lambda</code></td><td><code>0.7</code></td><td>相关性与多样性的平衡系数</td></tr>
+          <tr><td><code>temporalDecay.enabled</code></td><td><code>false</code></td><td>时间衰减：越近的记忆权重越高</td></tr>
+          <tr><td><code>temporalDecay.halfLifeDays</code></td><td><code>30</code></td><td>时间衰减半衰期（天）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">minScore 边界处理</div>
+      <p>当所有结果因 <code>minScore</code> 被过滤但存在 keyword 命中时，系统会放宽阈值至 <code>Math.min(minScore, textWeight)</code>。这解决了一个微妙的边界问题：关键词精确匹配的最高得分等于 <code>textWeight</code>（如 0.3），如果 <code>minScore</code> 设为 0.35 则精确匹配会被错误过滤。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: MEMORY FLUSH ==================== -->
+  <section id="memory-flush">
+    <h2>Memory Flush 生命周期</h2>
+
+    <p>
+      Memory Flush 是 OpenClaw 独创的<strong>预压缩记忆持久化</strong>机制（<code>memory-flush.ts</code> + <code>agent-runner-memory.ts</code>）。
+      当会话的 token 数接近上下文窗口限制时，系统在 Compaction（上下文压缩）之前触发一次特殊的 Agent 运行，将关键记忆写入磁盘。
+    </p>
+
+    <div class="flow-container">
+      <div class="flow-node flow-node-session">
+        <strong>Token 监控</strong><br>
+        <span style="font-size:0.8rem;">shouldRunMemoryFlush()</span>
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <span class="flow-arrow-label">超过阈值</span>
+      </div>
+      <div class="flow-node flow-node-main">
+        <strong>Memory Flush Run</strong><br>
+        <span style="font-size:0.8rem;">runMemoryFlushIfNeeded()</span>
+      </div>
+      <div class="flow-arrow">
+        <div class="flow-arrow-line"></div>
+        <span class="flow-arrow-label">Agent 写入</span>
+      </div>
+      <div class="flow-node flow-node-exec">
+        <strong>memory/YYYY-MM-DD.md</strong><br>
+        <span style="font-size:0.8rem;">追加模式</span>
+      </div>
+    </div>
+
+    <h3>触发条件</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/auto-reply/reply/memory-flush.ts &mdash; 触发判定</span>
+      </div>
+      <pre><code class="language-typescript">// 触发阈值 = 上下文窗口 - 保留空间 - 软阈值
+const threshold = contextWindow - reserveTokensFloor - softThresholdTokens;
+
+// 默认值:
+const DEFAULT_MEMORY_FLUSH_SOFT_TOKENS = 4000;
+const DEFAULT_MEMORY_FLUSH_FORCE_TRANSCRIPT_BYTES = 2 * 1024 * 1024; // 2 MB
+
+// 两种触发路径:
+// 1. projectedTokenCount >= threshold（token 数预测超过阈值）
+// 2. transcriptByteSize >= forceFlushTranscriptBytes（转录日志 >= 2MB）
+
+// 防重复机制: hasAlreadyFlushedForCurrentCompaction()
+// 通过 memoryFlushCompactionCount === compactionCount 确保
+// 每个 Compaction 周期只 flush 一次</code></pre>
+    </div>
+
+    <h3>安全护栏</h3>
+
+    <p>Memory Flush 的 prompt 中通过 <code>ensureMemoryFlushSafetyHints</code> 强制注入三条安全提示，即使用户自定义了 prompt 也会被追加：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>安全规则</th><th>目的</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>写入目标限定为 <code>memory/YYYY-MM-DD.md</code></td>
+            <td>防止 Agent 覆盖任意文件</td>
+          </tr>
+          <tr>
+            <td>仅追加，不覆盖已有内容</td>
+            <td>防止已有记忆丢失</td>
+          </tr>
+          <tr>
+            <td>MEMORY.md / SOUL.md / TOOLS.md / AGENTS.md 等为只读</td>
+            <td>保护引导文件不被 Flush 修改</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">Flush 与 Compaction 的关系</div>
+      <p>Memory Flush 发生在 Compaction <strong>之前</strong>。上下文即将被压缩时，先让 Agent 把重要信息写到磁盘，然后 Compaction 再安全地压缩上下文。如果 Flush 本身触发了 Compaction（因为写入操作增加了 token 数），系统通过 <code>incrementCompactionCount</code> 更新计数器并在 <code>memoryFlushCompactionCount</code> 中记录，防止下一轮重复触发。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: AGENT TOOLS ==================== -->
+  <section id="agent-tools">
+    <h2>Agent 工具接口</h2>
+
+    <p>记忆系统通过两个 Agent Tool 暴露给 AI 模型，遵循<strong>"先搜索，后精读"</strong>的两步模式：</p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4>memory_search</h4>
+        <p>
+          <strong>语义搜索</strong>&mdash;输入自然语言查询，返回最相关的记忆片段。
+          工具描述明确标注为 <em>"Mandatory recall step"</em>，提示 Agent 在回答涉及历史决策、人物、偏好等问题前必须先调用。
+        </p>
+        <p style="font-family:var(--font-code);font-size:var(--size-xs);color:var(--ink-tertiary);">
+          参数: query, maxResults?, minScore?
+        </p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4>memory_get</h4>
+        <p>
+          <strong>精确读取</strong>&mdash;根据 path + 行号范围读取原始 Markdown 内容。通常在 memory_search 之后使用，拉取完整上下文。内置路径安全检查：只允许读取 memory 目录及 <code>extraPaths</code>。
+        </p>
+        <p style="font-family:var(--font-code);font-size:var(--size-xs);color:var(--ink-tertiary);">
+          参数: path, from?, lines?
+        </p>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/memory/types.ts &mdash; MemorySearchResult</span>
+      </div>
+      <pre><code class="language-typescript">type MemorySearchResult = {
+  path: string;        // 相对路径，如 "memory/2026-03-10.md"
+  startLine: number;   // 片段起始行
+  endLine: number;     // 片段结束行
+  score: number;       // 相似度分数 (0-1)
+  snippet: string;     // 文本片段（最多 700 字符）
+  source: "memory" | "sessions";
+  citation?: string;   // 如 "memory/2026-03-10.md#L42-L58"
+};</code></pre>
+    </div>
+
+    <h3>Citations 模式</h3>
+    <p>搜索结果的引用标注支持三种模式：<code>"auto"</code>（默认，私聊显示、群聊隐藏）、<code>"on"</code>（始终显示）、<code>"off"</code>（始终隐藏）。引用格式为 <code>path#Lstart-Lend</code>，让 Agent 在回复中标注信息来源。聊天类型通过解析 <code>sessionKey</code> 中的 <code>:group:</code> 或 <code>:channel:</code> 标记自动判断。</p>
+
+    <div class="analogy">
+      <span class="analogy-label">两步模式类比</span>
+      <code>memory_search</code> 相当于在图书馆的检索系统中搜索关键词，得到一组书名和页码。<code>memory_get</code> 则是根据这些页码翻开具体的书页阅读内容。先检索再精读，避免一次性注入过多上下文。
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source">
+    <h2>源码索引</h2>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr><th>文件</th><th>职责</th><th>关键导出</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>src/memory/types.ts</td>
+            <td>核心类型定义</td>
+            <td><code>MemorySearchResult</code>, <code>MemorySearchManager</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/manager.ts</td>
+            <td>主索引管理器</td>
+            <td><code>MemoryIndexManager</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/manager-search.ts</td>
+            <td>Vector + FTS5 搜索实现</td>
+            <td><code>searchVector</code>, <code>searchKeyword</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/embeddings.ts</td>
+            <td>Provider 工厂 + auto 选择链</td>
+            <td><code>createEmbeddingProvider</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/memory-schema.ts</td>
+            <td>SQLite 索引表 schema</td>
+            <td><code>ensureMemoryIndexSchema</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/hybrid.ts</td>
+            <td>混合搜索融合算法</td>
+            <td><code>mergeHybridResults</code>, <code>bm25RankToScore</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/memory-search.ts</td>
+            <td>配置解析与默认值</td>
+            <td><code>resolveMemorySearchConfig</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/tools/memory-tool.ts</td>
+            <td>Agent 工具定义</td>
+            <td><code>createMemorySearchTool</code>, <code>createMemoryGetTool</code></td>
+          </tr>
+          <tr>
+            <td>src/auto-reply/reply/memory-flush.ts</td>
+            <td>Memory Flush 触发判定与设置</td>
+            <td><code>shouldRunMemoryFlush</code>, <code>resolveMemoryFlushSettings</code></td>
+          </tr>
+          <tr>
+            <td>src/auto-reply/reply/agent-runner-memory.ts</td>
+            <td>Memory Flush 运行器</td>
+            <td><code>runMemoryFlushIfNeeded</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/embedding-vectors.ts</td>
+            <td>向量归一化</td>
+            <td><code>sanitizeAndNormalizeEmbedding</code></td>
+          </tr>
+          <tr>
+            <td>src/memory/embedding-model-limits.ts</td>
+            <td>Provider 输入上限表</td>
+            <td><code>resolveEmbeddingMaxInputTokens</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">架构总结</div>
+      <p>Memory 系统的精妙之处在于它的<strong>层层降级</strong>设计：有 sqlite-vec 就用硬件加速向量搜索，没有就用纯 JS 余弦计算；有 Embedding API 就做语义搜索，没有就退回 FTS5 关键词匹配；有预压缩空间就做 Memory Flush，没有就正常 Compaction。无论运行环境多么受限，Agent 总能从记忆中检索信息。这种"尽力而为但永不崩溃"的哲学，贯穿了整个系统的设计。</p>
+    </div>
+  </section>
+
+
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; <a href="../index.html">返回总览</a></p>
+  </footer>
+
+</main>
+
+<script>
+  hljs.highlightAll();
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) currentId = section.id;
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>

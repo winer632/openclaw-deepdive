@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>安全与权限体系 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的安全与权限体系：DM Policy、Group Policy、Device Pairing、Exec Approvals、Tool Policy、安全审计">
+  <link rel="stylesheet" href="../assets/style.css">
+  <!-- Syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents (fixed side panel on wide screens) -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#overview">安全模型总览</a>
+  <a href="#dm-policy">DM Policy 四模式</a>
+  <a href="#group-policy">Group Policy</a>
+  <a href="#pairing">Device Pairing</a>
+  <a href="#exec-approvals">Exec Approvals</a>
+  <a href="#tool-policy">Tool 权限控制</a>
+  <a href="#audit">安全审计</a>
+  <a href="#source">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Security<br>安全与权限体系</h1>
+    <p class="doc-hero-subtitle">
+      多层纵深防御架构：从消息入口的 DM/Group Policy，到设备配对的身份认证，到命令执行的 Exec Approvals，再到工具调用的 per-agent 权限控制。安全贯穿每一层。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/security/ + src/infra/
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION: OVERVIEW ==================== -->
+  <section id="overview" class="animate-in delay-1">
+    <h2>安全模型总览</h2>
+
+    <p>
+      OpenClaw 是一个<strong>多通道 AI 网关</strong>，连接 Telegram、Discord、Slack、Signal、WhatsApp 等多个消息平台。
+      每个通道都可能接收到来自不同用户的消息，这些消息可能触发 AI Agent 执行各种操作——包括运行系统命令。
+      因此，安全不是某一个模块的事，而是<strong>贯穿整个请求生命周期</strong>的多层防线。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">安全层次：纵深防御</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>第 1 层：消息入口控制</strong><br>
+          <span style="font-size:0.8rem;">DM Policy + Group Policy — 谁可以给 Bot 发消息？</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">消息被接受后</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>第 2 层：身份认证</strong><br>
+          <span style="font-size:0.8rem;">Device Pairing — 设备/客户端配对 + Token 认证</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">Agent 需要执行命令时</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>第 3 层：执行审批</strong><br>
+          <span style="font-size:0.8rem;">Exec Approvals — 命令必须经过人工批准</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">Agent 调用工具时</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background:var(--accent-soft);border:2px solid rgba(209,77,53,0.25);color:var(--accent);padding:var(--space-3) var(--space-6);border-radius:10px;font-family:var(--font-mono);font-size:var(--size-sm);font-weight:500;text-align:center;max-width:440px;width:100%;">
+          <strong>第 4 层：工具权限</strong><br>
+          <span style="font-size:0.8rem;">Tool Policy — per-agent allow/deny 工具白名单</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        核心原则
+      </div>
+      <p><strong>默认安全（Secure by Default）</strong>：DM Policy 默认 <code>pairing</code>（需要配对才能对话），Group Policy 默认 <code>allowlist</code>（需要在白名单才能触发），Exec Approval 默认需要人工确认。</p>
+      <p>用户必须<strong>主动放宽</strong>安全限制，而不是被要求主动加固。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: DM POLICY ==================== -->
+  <section id="dm-policy">
+    <h2>DM Policy 四模式</h2>
+
+    <p>
+      DM Policy 控制<strong>谁可以通过私信（Direct Message）与 Bot 对话</strong>。
+      每个通道（Telegram、Discord、Slack 等）独立配置，共有 4 种模式。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/config/types.base.ts — DmPolicy 类型定义</span>
+      </div>
+      <pre><code class="language-typescript">export type DmPolicy = "pairing" | "allowlist" | "open" | "disabled";</code></pre>
+    </div>
+
+    <!-- DM Policy visual -->
+    <div class="diagram">
+      <div class="diagram-title">DM Policy 四模式对比</div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-3);">pairing</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-main">默认</div>
+        </div>
+        <span class="lane-info">未知用户触发配对流程，审批后自动加入白名单</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent-2);">allowlist</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-session">严格</div>
+        </div>
+        <span class="lane-info">仅配置文件中明确列出的用户可以对话</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--accent);">open</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-cron">开放</div>
+        </div>
+        <span class="lane-info">任何人都可以 DM Bot（需要 allowFrom 包含 "*"）</span>
+      </div>
+
+      <div class="lane-row">
+        <span class="lane-label" style="color: var(--ink-tertiary);">disabled</span>
+        <div class="lane-slots">
+          <div class="lane-slot lane-slot-empty">关闭</div>
+        </div>
+        <span class="lane-info">完全忽略所有 DM 消息</span>
+      </div>
+    </div>
+
+    <h3>决策流程</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/security/dm-policy-shared.ts — DM 访问决策</span>
+      </div>
+      <pre><code class="language-typescript">export function resolveDmGroupAccessDecision(params) {
+  const dmPolicy = params.dmPolicy ?? "pairing";  // 默认 pairing
+
+  if (dmPolicy === "disabled") {
+    return { decision: "block", reason: "dmPolicy=disabled" };
+  }
+  if (dmPolicy === "open") {
+    return { decision: "allow", reason: "dmPolicy=open" };
+  }
+  if (params.isSenderAllowed(effectiveAllowFrom)) {
+    return { decision: "allow", reason: "dmPolicy=... (allowlisted)" };
+  }
+  if (dmPolicy === "pairing") {
+    return { decision: "pairing", reason: "dmPolicy=pairing (not allowlisted)" };
+  }
+  // allowlist 模式：不在名单中就拒绝
+  return { decision: "block", reason: "dmPolicy=allowlist (not allowlisted)" };
+}</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        Pairing 模式的精妙
+      </div>
+      <p>
+        <code>pairing</code> 模式是<strong>安全性和易用性的平衡点</strong>：未知用户发消息时不会被直接拒绝，
+        而是触发一个"配对请求"流程——操作者可以在控制面板或 Telegram 中看到请求并一键批准。
+        批准后，该用户会自动被加入白名单（pairing store），后续消息直接放行。
+      </p>
+    </div>
+
+    <h3>白名单来源合并</h3>
+
+    <p>
+      DM 的白名单不仅来自配置文件 (<code>allowFrom</code>)，还包括通过配对流程批准的用户（存储在 pairing store 文件中）。
+      两个来源会被合并成一个 <code>effectiveAllowFrom</code> 列表用于访问判定。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION: GROUP POLICY ==================== -->
+  <section id="group-policy">
+    <h2>Group Policy</h2>
+
+    <p>
+      Group Policy 控制<strong>Bot 在群组/频道中如何响应消息</strong>。与 DM Policy 独立配置，
+      适用于 Telegram 群组、Discord 服务器频道、Slack 频道等场景。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/config/types.base.ts — GroupPolicy 类型定义</span>
+      </div>
+      <pre><code class="language-typescript">export type GroupPolicy = "open" | "disabled" | "allowlist";</code></pre>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>模式</th>
+            <th>默认</th>
+            <th>行为</th>
+            <th>适用场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>allowlist</td>
+            <td style="color:var(--accent-3);font-weight:600;">是</td>
+            <td>仅在配置的群组/频道中响应，且仅响应白名单用户</td>
+            <td>生产环境，精确控制 Bot 活跃范围</td>
+          </tr>
+          <tr>
+            <td>open</td>
+            <td>否</td>
+            <td>在所有群组中响应所有用户</td>
+            <td>开发测试，或信任所有群组成员</td>
+          </tr>
+          <tr>
+            <td>disabled</td>
+            <td>否</td>
+            <td>完全忽略群组消息</td>
+            <td>仅允许 DM 交互的 Bot</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>每通道独立配置</h3>
+
+    <p>
+      每个通道可以有自己的 Group Policy。例如 Telegram 可以设为 <code>allowlist</code>（仅允许特定群组），
+      而 Discord 设为 <code>open</code>（允许所有服务器）。全局默认值通过 <code>channels.defaults.groupPolicy</code> 配置。
+    </p>
+
+    <p>
+      对于 Telegram，群组访问控制还可以细化到<strong>每个群组</strong>甚至<strong>每个 Topic</strong>，
+      通过 <code>channels.telegram.groups.&lt;groupId&gt;</code> 进行精细配置。
+    </p>
+
+    <div class="analogy">
+      <div class="analogy-label">DM vs Group 类比</div>
+      <p>
+        DM Policy 相当于你家的<strong>门锁</strong>——决定谁能进你的房子。
+        Group Policy 相当于<strong>公司会议室的门禁卡</strong>——决定 Bot 可以进入哪些会议室，以及在会议室里听谁说话。
+        两者独立运作，互不影响。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: PAIRING ==================== -->
+  <section id="pairing">
+    <h2>Device Pairing 设备配对</h2>
+
+    <p>
+      Device Pairing 是 OpenClaw 的<strong>设备身份认证机制</strong>——允许移动 App、桌面客户端或第三方集成
+      安全地连接到 Gateway。配对流程遵循"<strong>请求 - 审批 - Token 生命周期</strong>"的三阶段模式。
+    </p>
+
+    <h3>配对流程</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">Device Pairing 三阶段流程</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>阶段 1：请求</strong><br>
+          <span style="font-size:0.8rem;">设备发送 deviceId + publicKey + 元数据<br>请求被存入 pending 队列（5 分钟 TTL）</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">操作者审批</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>阶段 2：审批</strong><br>
+          <span style="font-size:0.8rem;">操作者点击"批准"<br>生成 Token 并绑定角色/权限范围</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">设备持 Token 连接</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>阶段 3：Token 生命周期</strong><br>
+          <span style="font-size:0.8rem;">创建 / 验证 / 轮换 / 撤销<br>基于角色 + 权限范围的细粒度控制</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>数据结构</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/infra/device-pairing.ts — 核心类型</span>
+      </div>
+      <pre><code class="language-typescript">type DevicePairingPendingRequest = {
+  requestId: string;       // 请求唯一 ID
+  deviceId: string;        // 设备标识
+  publicKey: string;       // 设备公钥
+  displayName?: string;    // 设备显示名（如 "iPhone 15"）
+  platform?: string;       // 平台（如 "ios", "macos"）
+  role?: string;           // 请求的角色
+  scopes?: string[];       // 请求的权限范围
+  ts: number;              // 请求时间戳
+};
+
+type PairedDevice = {
+  deviceId: string;
+  publicKey: string;
+  roles?: string[];          // 已批准的角色列表
+  approvedScopes?: string[]; // 已批准的权限范围
+  tokens?: Record&lt;string, DeviceAuthToken&gt;;  // 每个角色一个 Token
+  createdAtMs: number;
+  approvedAtMs: number;
+};
+
+type DeviceAuthToken = {
+  token: string;            // 认证令牌
+  role: string;             // 绑定的角色
+  scopes: string[];         // 权限范围
+  createdAtMs: number;
+  rotatedAtMs?: number;     // 最近一次轮换时间
+  revokedAtMs?: number;     // 撤销时间（如有）
+  lastUsedAtMs?: number;    // 最近使用时间
+};</code></pre>
+    </div>
+
+    <h3>Token 生命周期操作</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>操作</th>
+            <th>函数</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>请求配对</td>
+            <td><code>requestDevicePairing()</code></td>
+            <td>设备发起配对请求，存入 pending 队列（5 分钟过期）</td>
+          </tr>
+          <tr>
+            <td>批准配对</td>
+            <td><code>approveDevicePairing()</code></td>
+            <td>操作者批准请求，生成 Token 并转移到 paired 列表</td>
+          </tr>
+          <tr>
+            <td>拒绝配对</td>
+            <td><code>rejectDevicePairing()</code></td>
+            <td>操作者拒绝请求，从 pending 中删除</td>
+          </tr>
+          <tr>
+            <td>验证 Token</td>
+            <td><code>verifyDeviceToken()</code></td>
+            <td>检查 Token 有效性、角色匹配、权限范围</td>
+          </tr>
+          <tr>
+            <td>轮换 Token</td>
+            <td><code>rotateDeviceToken()</code></td>
+            <td>生成新 Token 替换旧 Token（保留元数据）</td>
+          </tr>
+          <tr>
+            <td>撤销 Token</td>
+            <td><code>revokeDeviceToken()</code></td>
+            <td>标记 Token 为已撤销，不删除记录</td>
+          </tr>
+          <tr>
+            <td>移除设备</td>
+            <td><code>removePairedDevice()</code></td>
+            <td>完全删除设备配对记录</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Scope 权限模型
+      </div>
+      <p>每个 Token 绑定了一组 <strong>scopes（权限范围）</strong>。验证时不仅检查 Token 本身的合法性，还会检查请求的操作是否在 Token 的 scopes 范围内。</p>
+      <p>此外，Token 的 scopes 必须是设备 <code>approvedScopes</code> 的子集——即使 Token 被轮换，也不能获得超出初始批准范围的权限。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: EXEC APPROVALS ==================== -->
+  <section id="exec-approvals">
+    <h2>Exec Approvals 执行审批</h2>
+
+    <p>
+      当 AI Agent 需要执行系统命令（如运行 shell 命令、操作文件）时，<strong>Exec Approvals</strong> 机制
+      确保每个命令都必须经过人工审批或通过安全策略的自动放行。
+    </p>
+
+    <h3>安全策略三级</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/infra/exec-approvals.ts — 安全级别</span>
+      </div>
+      <pre><code class="language-typescript">export type ExecSecurity = "deny" | "allowlist" | "full";
+export type ExecAsk = "off" | "on-miss" | "always";</code></pre>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ExecSecurity</th>
+            <th>行为</th>
+            <th>适用场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>deny</td>
+            <td style="color:var(--accent);font-weight:600;">完全禁止</td>
+            <td>不允许 Agent 执行任何系统命令</td>
+          </tr>
+          <tr>
+            <td>allowlist</td>
+            <td style="color:var(--accent-2);font-weight:600;">白名单控制</td>
+            <td>仅允许白名单中的命令；其他命令需要审批</td>
+          </tr>
+          <tr>
+            <td>full</td>
+            <td style="color:var(--accent-3);font-weight:600;">完全允许</td>
+            <td>允许所有命令（但仍可配合 ask 进行审批）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ExecAsk</th>
+            <th>行为</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>off</td>
+            <td>不弹出审批请求（由 security 策略直接决定）</td>
+          </tr>
+          <tr>
+            <td>on-miss</td>
+            <td>命令不在白名单时，弹出审批请求</td>
+          </tr>
+          <tr>
+            <td>always</td>
+            <td>所有命令都弹出审批请求</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>双层审批架构</h3>
+
+    <p>
+      Exec Approvals 采用<strong>双层架构</strong>——Gateway 层和 Node 层各有独立的审批逻辑：
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">Gateway 层</h4>
+        <p>
+          <code>ExecApprovalManager</code> 管理审批的生命周期：创建请求、等待决定、超时处理。
+          审批请求通过 WebSocket 广播到所有连接的客户端（控制面板、Telegram Bot 等）。
+        </p>
+        <p style="font-family:var(--font-mono);font-size:var(--size-xs);color:var(--ink-tertiary);">
+          src/gateway/exec-approval-manager.ts
+        </p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">Node 层</h4>
+        <p>
+          <code>evaluateSystemRunPolicy()</code> 在命令实际执行前进行最终决策：
+          综合 security、ask、白名单匹配和审批结果，决定是否放行。
+        </p>
+        <p style="font-family:var(--font-mono);font-size:var(--size-xs);color:var(--ink-tertiary);">
+          src/node-host/exec-policy.ts
+        </p>
+      </div>
+    </div>
+
+    <h3>审批决定类型</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/infra/exec-approvals.ts — 审批决定</span>
+      </div>
+      <pre><code class="language-typescript">export type ExecApprovalDecision = "allow-once" | "allow-always" | "deny";
+
+// allow-once  — 仅本次允许（一次性消费，不可重放）
+// allow-always — 永久允许该命令模式（加入运行时白名单）
+// deny        — 拒绝执行</code></pre>
+    </div>
+
+    <h3>审批流程</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/node-host/exec-policy.ts — 策略评估核心</span>
+      </div>
+      <pre><code class="language-typescript">export function evaluateSystemRunPolicy(params) {
+  // 1. security=deny → 直接拒绝
+  if (params.security === "deny") {
+    return { allowed: false, errorMessage: "SYSTEM_RUN_DISABLED: security=deny" };
+  }
+
+  // 2. 检查是否需要审批
+  const requiresAsk = requiresExecApproval({
+    ask: params.ask,
+    security: params.security,
+    analysisOk,
+    allowlistSatisfied,
+  });
+  if (requiresAsk && !approvedByAsk) {
+    return { allowed: false, errorMessage: "SYSTEM_RUN_DENIED: approval required" };
+  }
+
+  // 3. allowlist 模式：白名单未命中且未经审批 → 拒绝
+  if (params.security === "allowlist" && !allowlistSatisfied && !approvedByAsk) {
+    return { allowed: false, errorMessage: "SYSTEM_RUN_DENIED: allowlist miss" };
+  }
+
+  // 4. 通过所有检查 → 允许执行
+  return { allowed: true };
+}</code></pre>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        Shell Wrapper 特殊处理
+      </div>
+      <p>当 <code>security=allowlist</code> 时，shell wrapper 调用（如 <code>bash -c "..."</code>, <code>sh -c "..."</code>）会被<strong>特殊拦截</strong>。因为 shell wrapper 可以执行任意命令，白名单检查在语义上无法覆盖其内部内容，因此即使外层命令匹配白名单，shell wrapper 仍会要求审批。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: TOOL POLICY ==================== -->
+  <section id="tool-policy">
+    <h2>Tool 权限控制</h2>
+
+    <p>
+      除了命令执行层面的 Exec Approvals，OpenClaw 还支持在 <strong>Agent 工具层面</strong>进行细粒度的权限控制。
+      每个 Agent 可以配置独立的 <code>toolPolicy</code>，指定允许或禁止使用的工具列表。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/sandbox-tool-policy.ts — Tool Policy 解析</span>
+      </div>
+      <pre><code class="language-typescript">type SandboxToolPolicyConfig = {
+  allow?: string[];       // 允许的工具列表（白名单）
+  alsoAllow?: string[];   // 追加到白名单（不覆盖默认值）
+  deny?: string[];        // 禁止的工具列表（黑名单）
+};
+
+export function pickSandboxToolPolicy(config?) {
+  const allow = unionAllow(config.allow, config.alsoAllow);
+  const deny = Array.isArray(config.deny) ? config.deny : undefined;
+  if (!allow && !deny) return undefined;
+  return { allow, deny };
+}</code></pre>
+    </div>
+
+    <h3>Allow / Deny 语义</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>配置</th>
+            <th>效果</th>
+            <th>示例</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>allow: ["memory_search", "web_search"]</td>
+            <td>仅允许使用列出的工具，其他工具不可用</td>
+            <td>限制只读 Agent 只能搜索</td>
+          </tr>
+          <tr>
+            <td>alsoAllow: ["custom_tool"]</td>
+            <td>在默认允许的基础上追加工具</td>
+            <td>为特定 Agent 增加自定义工具</td>
+          </tr>
+          <tr>
+            <td>deny: ["system_run"]</td>
+            <td>禁止使用列出的工具，其他工具仍可用</td>
+            <td>禁止某个 Agent 执行系统命令</td>
+          </tr>
+          <tr>
+            <td>allow: ["*"]</td>
+            <td>允许所有工具（通配符）</td>
+            <td>alsoAllow 无显式 allow 时的隐含行为</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        与 Exec Approvals 的关系
+      </div>
+      <p>Tool Policy 和 Exec Approvals 在不同层面工作：</p>
+      <p><strong>Tool Policy</strong> 决定 Agent 是否<strong>有权调用某个工具</strong>（在工具注入层面过滤）。</p>
+      <p><strong>Exec Approvals</strong> 决定已经被调用的 <code>system_run</code> 工具的<strong>具体命令是否被允许执行</strong>（在命令执行层面审批）。</p>
+      <p>两者形成双重保护：即使 Agent 有权调用 <code>system_run</code> 工具，每个具体的命令仍然需要通过 Exec Approvals 的检查。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: AUDIT ==================== -->
+  <section id="audit">
+    <h2>安全审计</h2>
+
+    <p>
+      OpenClaw 提供了一个内置的安全审计命令 <code>openclaw security audit</code>，
+      自动扫描配置文件和运行状态，检测常见的安全隐患。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">Shell</span>
+        <span class="code-block-file">安全审计命令</span>
+      </div>
+      <pre><code class="language-typescript">openclaw security audit          // 基础审计
+openclaw security audit --deep   // 包含实时 Gateway 探测
+openclaw security audit --fix    // 自动修复文件权限等问题
+openclaw security audit --json   // 输出机器可读的 JSON</code></pre>
+    </div>
+
+    <h3>审计发现分级</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>级别</th>
+            <th>含义</th>
+            <th>示例</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="color:var(--accent);font-weight:700;">critical</td>
+            <td>需要立即修复的高危问题</td>
+            <td>DM Policy 设为 open、群组白名单包含通配符 "*"</td>
+          </tr>
+          <tr>
+            <td style="color:#F59E0B;font-weight:700;">warn</td>
+            <td>建议关注的潜在风险</td>
+            <td>Telegram 白名单使用用户名而非 ID、多 DM 用户共享主会话</td>
+          </tr>
+          <tr>
+            <td style="color:var(--ink-tertiary);font-weight:700;">info</td>
+            <td>信息性提示</td>
+            <td>DM 已禁用（正常配置）、使用了 break-glass 兼容模式</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>审计检查范围</h3>
+
+    <p>审计系统检查的范围覆盖了安全体系的各个层面：</p>
+
+    <ul>
+      <li><strong>通道安全</strong>（<code>audit-channel.ts</code>）——每个通道的 DM Policy、Group Policy、白名单配置</li>
+      <li><strong>Gateway HTTP 安全</strong>——是否启用了认证、是否存在 sessionKey 覆盖风险</li>
+      <li><strong>文件系统权限</strong>——配置文件和状态目录的 chmod 是否安全</li>
+      <li><strong>Tool Policy</strong>（<code>audit-tool-policy.ts</code>）——per-agent 工具权限配置</li>
+      <li><strong>Hooks 安全</strong>——自定义 hooks 脚本的安全性</li>
+      <li><strong>模型卫生</strong>——是否使用了不受信任的模型提供商</li>
+      <li><strong>插件安全</strong>——已安装的 Skills/Plugins 的代码安全性</li>
+      <li><strong>Node 危险命令</strong>——Node host 的 allow/deny 命令模式</li>
+      <li><strong>攻击面摘要</strong>——暴露的端口和服务总览</li>
+    </ul>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/security/audit.ts — SecurityAuditFinding 类型</span>
+      </div>
+      <pre><code class="language-typescript">export type SecurityAuditSeverity = "critical" | "warn" | "info";
+
+export type SecurityAuditFinding = {
+  checkId: string;                 // 如 "channels.telegram.dm.open"
+  severity: SecurityAuditSeverity; // 严重程度
+  title: string;                   // 简短描述
+  detail: string;                  // 详细解释
+  remediation?: string;            // 修复建议
+};</code></pre>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">审计类比</div>
+      <p>
+        <code>openclaw security audit</code> 就像房屋的安全检查——检查门锁是否上好（DM Policy）、
+        窗户是否关严（Group Policy）、消防通道是否畅通（文件权限）、报警系统是否正常工作（Exec Approvals 配置）。
+        它不会替你修好所有问题，但会清楚地告诉你哪里有风险和如何修复。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION: SOURCE ==================== -->
+  <section id="source">
+    <h2>源码索引</h2>
+
+    <p>以下是安全与权限体系涉及的关键源文件，按职责分层列出：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>src/config/types.base.ts</td>
+            <td>安全策略类型定义</td>
+            <td><code>DmPolicy</code>, <code>GroupPolicy</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/security/dm-policy-shared.ts</td>
+            <td>DM/Group 访问决策核心逻辑</td>
+            <td><code>resolveDmGroupAccessDecision</code>, <code>resolveDmGroupAccessWithCommandGate</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/infra/device-pairing.ts</td>
+            <td>设备配对完整生命周期</td>
+            <td><code>requestDevicePairing</code>, <code>approveDevicePairing</code>, <code>verifyDeviceToken</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/infra/exec-approvals.ts</td>
+            <td>执行审批类型 + 分析 + 白名单</td>
+            <td><code>ExecSecurity</code>, <code>ExecAsk</code>, <code>ExecApprovalDecision</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/gateway/exec-approval-manager.ts</td>
+            <td>Gateway 层审批管理器</td>
+            <td><code>ExecApprovalManager</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/gateway/server-methods/exec-approval.ts</td>
+            <td>审批 RPC 处理器</td>
+            <td><code>createExecApprovalHandlers</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/node-host/exec-policy.ts</td>
+            <td>Node 层命令执行策略评估</td>
+            <td><code>evaluateSystemRunPolicy</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/agents/sandbox-tool-policy.ts</td>
+            <td>Tool Policy 解析（allow/deny）</td>
+            <td><code>pickSandboxToolPolicy</code></td>
+          </tr>
+          <tr>
+            <td>src/security/audit.ts</td>
+            <td>安全审计引擎</td>
+            <td><code>runSecurityAudit</code>, <code>SecurityAuditFinding</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/security/audit-channel.ts</td>
+            <td>通道安全审计（DM/Group Policy 检查）</td>
+            <td><code>collectChannelSecurityFindings</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/security/audit-tool-policy.ts</td>
+            <td>工具权限审计</td>
+            <td><code>pickSandboxToolPolicy</code>（re-export）</td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/cli/security-cli.ts</td>
+            <td>CLI 安全命令注册</td>
+            <td><code>registerSecurityCli</code></td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/telegram/dm-access.ts</td>
+            <td>Telegram DM 访问控制实现</td>
+            <td>DM Policy 在 Telegram 通道中的应用</td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/telegram/exec-approvals.ts</td>
+            <td>Telegram 审批按钮交互</td>
+            <td>审批请求转发到 Telegram 对话</td>
+          </tr>
+          <tr>
+            <td style="word-break:break-all;">src/discord/exec-approvals.ts</td>
+            <td>Discord 审批交互</td>
+            <td>审批请求转发到 Discord 频道</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>安全关注点横切所有层</h3>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">安全体系全景</span>
+      </div>
+      <pre><code class="language-typescript">// 一条消息从进入系统到触发命令执行，经过的安全检查：
+
+// 1. 消息入口 — DM/Group Policy
+//    → Telegram: src/telegram/dm-access.ts + group-access.ts
+//    → Discord:  src/discord/monitor/...
+//    → 共享逻辑: src/security/dm-policy-shared.ts
+
+// 2. 客户端认证 — Device Pairing
+//    → src/infra/device-pairing.ts
+//    → 验证: verifyDeviceToken() — token + role + scopes
+
+// 3. 工具过滤 — Tool Policy
+//    → src/agents/sandbox-tool-policy.ts
+//    → allow/alsoAllow/deny 白名单/黑名单
+
+// 4. 命令审批 — Exec Approvals
+//    → Gateway: src/gateway/exec-approval-manager.ts (管理审批生命周期)
+//    → Node:    src/node-host/exec-policy.ts (最终执行决策)
+//    → 审批 UI: Telegram 按钮 / Discord 按钮 / 控制面板
+
+// 5. 审计检测 — Security Audit
+//    → src/security/audit.ts (综合扫描以上所有配置)</code></pre>
+    </div>
+  </section>
+
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="doc-footer">
+    <p>
+      OpenClaw Architecture Deep Dive &middot;
+      <a href="../index.html">返回总览</a>
+    </p>
+  </footer>
+
+</main>
+
+<script>
+  // Syntax highlighting
+  hljs.highlightAll();
+
+  // Scroll progress bar
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // TOC active state tracking
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) {
+        currentId = section.id;
+      }
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  // Animate-in on scroll (intersection observer)
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => {
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>

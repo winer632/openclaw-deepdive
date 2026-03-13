@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tool 系统与 Sandbox 沙箱 — OpenClaw 架构解析</title>
+  <meta name="description" content="深入解析 OpenClaw 的 Tool 系统：7 层 Policy 过滤管线、Plugin Hooks 生命周期、Docker 沙箱隔离架构与容器安全参数">
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#catalog">Tool 注册与 Catalog</a>
+  <a href="#policy-pipeline">7 层 Policy 过滤管线</a>
+  <a href="#plugin-tools">Plugin 工具扩展</a>
+  <a href="#hooks-lifecycle">Hook 执行生命周期</a>
+  <a href="#sandbox-arch">Docker 沙箱架构</a>
+  <a href="#sandbox-scope">3 级 Sandbox Scope</a>
+  <a href="#sandbox-security">容器安全与 Bind Mount 验证</a>
+  <a href="#source-index">源码索引</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Architecture Deep Dive</div>
+    <h1>Tool 系统与 Sandbox 沙箱</h1>
+    <p class="doc-hero-subtitle">
+      从 25 个核心工具到无限 Plugin 扩展，经过 7 层 Policy 过滤管线，
+      在 Docker 容器中安全执行。理解 OpenClaw 如何在 Agent 的开放性与操作系统级安全隔离之间取得精确平衡。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        src/agents/tool-policy-pipeline.ts
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-13
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION 1: CATALOG ==================== -->
+  <section id="catalog">
+    <h2>Tool 注册与 Catalog</h2>
+
+    <p>
+      OpenClaw 的工具系统是 Agent 与外部世界交互的唯一通道。每个工具都在 <code>tool-catalog.ts</code>
+      中进行<strong>声明式注册</strong>，通过 <code>CoreToolDefinition</code> 定义唯一 ID、所属分区（section）
+      和所属 Profile。系统启动时动态组装工具列表，而非静态配置。
+    </p>
+
+    <h3>11 个工具分区</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>分区 (Section)</th>
+            <th>包含的工具</th>
+            <th>Group 引用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Files</td>
+            <td><code>read</code>, <code>write</code>, <code>edit</code>, <code>apply_patch</code></td>
+            <td><code>group:fs</code></td>
+          </tr>
+          <tr>
+            <td>Runtime</td>
+            <td><code>exec</code>, <code>process</code></td>
+            <td><code>group:runtime</code></td>
+          </tr>
+          <tr>
+            <td>Web</td>
+            <td><code>web_search</code>, <code>web_fetch</code></td>
+            <td><code>group:web</code></td>
+          </tr>
+          <tr>
+            <td>Memory</td>
+            <td><code>memory_search</code>, <code>memory_get</code></td>
+            <td><code>group:memory</code></td>
+          </tr>
+          <tr>
+            <td>Sessions</td>
+            <td><code>sessions_list</code>, <code>sessions_history</code>, <code>sessions_send</code>, <code>sessions_spawn</code>, <code>subagents</code>, <code>session_status</code></td>
+            <td><code>group:sessions</code></td>
+          </tr>
+          <tr>
+            <td>UI</td>
+            <td><code>browser</code>, <code>canvas</code></td>
+            <td><code>group:ui</code></td>
+          </tr>
+          <tr>
+            <td>Messaging</td>
+            <td><code>message</code></td>
+            <td><code>group:messaging</code></td>
+          </tr>
+          <tr>
+            <td>Automation</td>
+            <td><code>cron</code>, <code>gateway</code></td>
+            <td><code>group:automation</code></td>
+          </tr>
+          <tr>
+            <td>Nodes</td>
+            <td><code>nodes</code></td>
+            <td><code>group:nodes</code></td>
+          </tr>
+          <tr>
+            <td>Agents</td>
+            <td><code>agents_list</code></td>
+            <td><code>group:agents</code></td>
+          </tr>
+          <tr>
+            <td>Media</td>
+            <td><code>image</code>, <code>tts</code></td>
+            <td><code>group:media</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>4 种 Tool Profile</h3>
+
+    <p>Profile 是工具组合的预设方案，通过 <code>tools.profile</code> 配置项选择：</p>
+
+    <div class="compare-grid">
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">minimal</h4>
+        <p>仅包含 <code>session_status</code>。纯对话场景，Agent 无编码/执行能力。</p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-2);">coding</h4>
+        <p>文件 + 运行时 + Web + Memory + Sessions。编码助手的标准配置。</p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-3);">messaging</h4>
+        <p><code>message</code> + Sessions 子集。多通道消息路由场景。</p>
+      </div>
+      <div class="compare-card compare-card-good">
+        <h4 style="color: var(--accent-4);">full</h4>
+        <p>不设 allow/deny 限制——所有工具（含 Plugin）全部可用。</p>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/tool-catalog.ts — CoreToolDefinition</span>
+      </div>
+      <pre><code class="language-typescript">type CoreToolDefinition = {
+  id: string;                      // 工具唯一标识 (如 "exec")
+  label: string;                   // 显示名称
+  description: string;             // 工具描述
+  sectionId: string;               // 所属分区 (如 "runtime")
+  profiles: ToolProfileId[];       // 属于哪些 Profile
+  includeInOpenClawGroup?: boolean; // 是否纳入 group:openclaw
+};</code></pre>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        核心洞察
+      </div>
+      <p><strong>group:openclaw</strong> 是一个特殊的工具组，包含所有标记了 <code>includeInOpenClawGroup: true</code> 的工具（25 个核心工具中的绝大多数）。配置 <code>tools.allow: ["group:openclaw"]</code> 即可启用全部核心工具，而不受 Plugin 工具干扰。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 2: POLICY PIPELINE ==================== -->
+  <section id="policy-pipeline">
+    <h2>7 层 Policy 过滤管线</h2>
+
+    <p>
+      工具组装完毕后，需要经过 <code>applyToolPolicyPipeline()</code> 的<strong>7 层过滤</strong>。
+      每一层都可以通过 <code>allow</code>（白名单）和 <code>deny</code>（黑名单）控制工具可见性。
+      当某一层配置了 <code>allow</code> 列表时，只有被列入的工具才能通过；所有层的 <code>deny</code> 都会立即排除匹配的工具。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">buildDefaultToolPolicyPipelineSteps() 定义的 7 层管线</div>
+      <div class="flow-container">
+        <div class="flow-node" style="background: var(--accent-4-soft); border: 2px solid rgba(124, 58, 237, 0.25); color: var(--accent-4);">
+          <strong>Layer 1: tools.profile</strong><br>
+          <span style="font-size:0.8rem;">全局 Profile 策略（minimal / coding / messaging / full）</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background: var(--accent-4-soft); border: 2px solid rgba(124, 58, 237, 0.25); color: var(--accent-4);">
+          <strong>Layer 2: tools.byProvider.profile</strong><br>
+          <span style="font-size:0.8rem;">按 AI 提供商（Anthropic / OpenAI / Google）覆盖 Profile</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-session">
+          <strong>Layer 3: tools.allow / tools.deny</strong><br>
+          <span style="font-size:0.8rem;">全局工具白/黑名单</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-session">
+          <strong>Layer 4: tools.byProvider.allow</strong><br>
+          <span style="font-size:0.8rem;">按 AI 提供商的工具白/黑名单</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>Layer 5: agents.&lt;id&gt;.tools.allow</strong><br>
+          <span style="font-size:0.8rem;">特定 Agent 的工具策略</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>Layer 6: agents.&lt;id&gt;.tools.byProvider.allow</strong><br>
+          <span style="font-size:0.8rem;">特定 Agent 按提供商的工具策略</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>Layer 7: group tools.allow</strong><br>
+          <span style="font-size:0.8rem;">群组/频道级别的工具策略</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>Plugin-Only Allowlist 保护</h3>
+
+    <p>
+      每一层在执行前都会调用 <code>stripPluginOnlyAllowlist()</code>，检测 allowlist 中是否<strong>仅包含 Plugin 工具名</strong>。
+      如果是，则自动剥离该 allowlist，防止管理员误配导致所有核心工具被意外禁用。
+      用户应使用 <code>tools.alsoAllow</code> 来<strong>追加</strong>Plugin 工具，而非替换核心工具。
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/tool-policy-pipeline.ts — applyToolPolicyPipeline</span>
+      </div>
+      <pre><code class="language-typescript">export function applyToolPolicyPipeline(params: {
+  tools: AnyAgentTool[];
+  toolMeta: (tool: AnyAgentTool) =&gt; { pluginId: string } | undefined;
+  warn: (message: string) =&gt; void;
+  steps: ToolPolicyPipelineStep[];
+}): AnyAgentTool[] {
+  let filtered = params.tools;
+  for (const step of params.steps) {
+    if (!step.policy) continue;
+    // 检测并剥离仅含 Plugin 工具的 allowlist
+    const resolved = stripPluginOnlyAllowlist(policy, pluginGroups, coreToolNames);
+    if (resolved.unknownAllowlist.length &gt; 0) {
+      params.warn(`${step.label} contains unknown entries...`);
+    }
+    const expanded = expandPolicyWithPluginGroups(resolved.policy, pluginGroups);
+    filtered = expanded ? filterToolsByPolicy(filtered, expanded) : filtered;
+  }
+  return filtered;
+}</code></pre>
+    </div>
+
+    <h3>Pipeline 之外的额外过滤层</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>过滤层</th>
+            <th>代码位置</th>
+            <th>作用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>sandbox.tools</td>
+            <td>sandbox/tool-policy.ts</td>
+            <td>Sandbox 容器内允许/拒绝的工具（glob 匹配）</td>
+          </tr>
+          <tr>
+            <td>owner-only</td>
+            <td>tool-policy.ts</td>
+            <td><code>whatsapp_login</code>、<code>cron</code>、<code>gateway</code>、<code>nodes</code> 仅限 owner 使用</td>
+          </tr>
+          <tr>
+            <td>tool name alias</td>
+            <td>tool-policy-shared.ts</td>
+            <td><code>bash</code> &rarr; <code>exec</code>、<code>apply-patch</code> &rarr; <code>apply_patch</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">生活类比</div>
+      <p>
+        想象一个机场安检流程：旅客先过护照检查（Profile），再过行李 X 光机（全局策略），
+        然后过登机口核验（Agent 级策略），最后过机上安检（群组策略）。
+        每一关都可以拦截可疑物品（deny）或只放行已申报物品（allow）。
+        最终登机的只有所有关卡都通过的工具。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 3: PLUGIN TOOLS ==================== -->
+  <section id="plugin-tools">
+    <h2>Plugin 工具扩展</h2>
+
+    <p>
+      除了 25 个核心工具，OpenClaw 支持通过 <code>extensions/*</code> 目录下的 Plugin 注册自定义工具。
+      Plugin 工具与核心工具共享相同的 Policy 管线，但有额外的安全机制。
+    </p>
+
+    <h3>Plugin 工具加载流程</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">resolvePluginTools() 加载管线</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>1. 发现 Plugins</strong><br>
+          <span style="font-size:0.8rem;">loadOpenClawPlugins() 扫描 extensions/* 和 config 中声明的插件</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">registry.tools</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>2. 名称冲突检测</strong><br>
+          <span style="font-size:0.8rem;">Plugin ID 和工具名不能与核心工具重名，否则被 block</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">factory(context)</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>3. 实例化 &amp; 元数据标记</strong><br>
+          <span style="font-size:0.8rem;">WeakMap 标记 pluginId + optional 属性</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/plugins/tools.ts — Plugin 工具元数据追踪</span>
+      </div>
+      <pre><code class="language-typescript">const pluginToolMeta = new WeakMap&lt;AnyAgentTool, PluginToolMeta&gt;();
+
+type PluginToolMeta = {
+  pluginId: string;    // 来源插件标识
+  optional: boolean;   // 是否为可选工具（需要 allowlist 显式启用）
+};
+
+// 每个 Plugin 工具都通过 WeakMap 标记来源
+// 用于后续 Policy 管线中的 group:plugins 展开
+pluginToolMeta.set(tool, { pluginId: entry.pluginId, optional: entry.optional });</code></pre>
+    </div>
+
+    <h3>Plugin Group 展开机制</h3>
+
+    <p>
+      Policy 中可以使用 <code>group:plugins</code> 引用所有 Plugin 工具，
+      或直接使用 Plugin ID（如 <code>feishu</code>）引用该插件注册的所有工具。
+      <code>expandPluginGroups()</code> 在 Policy 匹配时将这些逻辑组展开为具体工具名列表。
+    </p>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        设计亮点
+      </div>
+      <p><strong>Optional Tools 的 Opt-in 设计</strong>：标记为 <code>optional: true</code> 的 Plugin 工具默认不加载。只有在 <code>tools.alsoAllow</code> 中显式列出工具名、Plugin ID、或 <code>group:plugins</code> 时才会启用。这避免了安装 Plugin 后工具自动暴露给所有 Agent 的风险。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 4: HOOKS ==================== -->
+  <section id="hooks-lifecycle">
+    <h2>Hook 执行生命周期</h2>
+
+    <p>
+      即使工具通过了 Policy 过滤，在实际执行时还有一道防线——<strong>Plugin Hooks</strong>。
+      Hooks 是 OpenClaw 的事件系统，Plugin 可以监听 <code>before_tool_call</code>、<code>after_tool_call</code>
+      等事件，在工具执行前后介入。
+    </p>
+
+    <div class="diagram">
+      <div class="diagram-title">Tool 执行完整生命周期</div>
+      <div class="flow-container">
+        <div class="flow-node flow-node-session">
+          <strong>1. Tool Loop Detection</strong><br>
+          <span style="font-size:0.8rem;">检测重复调用模式（同一工具 + 同参数），critical 级别直接阻断</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">通过检测</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-main">
+          <strong>2. before_tool_call Hook</strong><br>
+          <span style="font-size:0.8rem;">按 priority 顺序执行，可修改参数或返回 block: true 阻断</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">未被阻断</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node flow-node-exec">
+          <strong>3. tool.execute()</strong><br>
+          <span style="font-size:0.8rem;">实际执行工具逻辑（宿主机或 Docker 容器内）</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">执行完毕</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background: var(--accent-4-soft); border: 2px solid rgba(124, 58, 237, 0.25); color: var(--accent-4);">
+          <strong>4. after_tool_call Hook</strong><br>
+          <span style="font-size:0.8rem;">并行执行（fire-and-forget），不影响工具结果</span>
+        </div>
+        <div class="flow-arrow">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-label">结果持久化</span>
+          <div class="flow-arrow-line"></div>
+        </div>
+        <div class="flow-node" style="background: var(--accent-4-soft); border: 2px solid rgba(124, 58, 237, 0.25); color: var(--accent-4);">
+          <strong>5. tool_result_persist Hook</strong><br>
+          <span style="font-size:0.8rem;">同步钩子，可修改写入会话日志的结果</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Hook</th>
+            <th>执行模式</th>
+            <th>返回值影响</th>
+            <th>典型用途</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>before_tool_call</code></td>
+            <td>顺序（按 priority）</td>
+            <td>可修改 params / 返回 block</td>
+            <td>参数校验、审计、阻断危险操作</td>
+          </tr>
+          <tr>
+            <td><code>after_tool_call</code></td>
+            <td>并行（fire-and-forget）</td>
+            <td>void</td>
+            <td>日志记录、指标收集</td>
+          </tr>
+          <tr>
+            <td><code>tool_result_persist</code></td>
+            <td>顺序（同步）</td>
+            <td>可替换 message</td>
+            <td>脱敏、压缩写入会话的结果</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Hook 来源与发现</h3>
+
+    <p>Hook 可以来自四种来源，按优先级加载：</p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>来源</th>
+            <th>路径</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>openclaw-bundled</code></td>
+            <td>src/hooks/bundled/</td>
+            <td>内置 Hook：boot-md、session-memory、command-logger 等</td>
+          </tr>
+          <tr>
+            <td><code>openclaw-managed</code></td>
+            <td>~/.openclaw/hooks/</td>
+            <td>用户安装的 Hook（npm / git）</td>
+          </tr>
+          <tr>
+            <td><code>openclaw-workspace</code></td>
+            <td>{workspace}/.openclaw/hooks/</td>
+            <td>项目级 Hook</td>
+          </tr>
+          <tr>
+            <td><code>openclaw-plugin</code></td>
+            <td>extensions/*/</td>
+            <td>Plugin 提供的 Hook</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        安全设计
+      </div>
+      <p><strong>before_tool_call 的修改型设计</strong>允许多个 Plugin 链式协作：一个负责审计日志，另一个负责参数脱敏，第三个负责访问控制。而 <strong>after_tool_call 的观察型设计</strong>保证即使某个 Plugin 出错，也不会阻塞工具链返回结果。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 5: SANDBOX ARCH ==================== -->
+  <section id="sandbox-arch">
+    <h2>Docker 沙箱架构</h2>
+
+    <p>
+      当 <code>agents.defaults.sandbox.mode</code> 设为 <code>"non-main"</code> 或 <code>"all"</code> 时，
+      OpenClaw 会为 Agent 会话创建独立的 Docker 容器，将 <code>exec</code>、<code>read</code>、<code>write</code>
+      等工具的执行隔离在容器中。
+    </p>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        为什么需要沙箱
+      </div>
+      <p>AI Agent 的 <code>exec</code> 工具可以执行<strong>任意 Shell 命令</strong>。在没有沙箱的情况下，一个被误导的 Agent 可能删除系统文件、泄露敏感数据、或攻击内网服务。Docker 沙箱将"爆炸半径"限制在容器内部，提供操作系统级隔离。</p>
+    </div>
+
+    <h3>默认容器安全参数</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Docker 参数</th>
+            <th>默认值</th>
+            <th>安全作用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>--read-only</code></td>
+            <td><code>true</code></td>
+            <td>只读根文件系统，防止写入系统目录</td>
+          </tr>
+          <tr>
+            <td><code>--network</code></td>
+            <td><code>none</code></td>
+            <td>完全隔离网络，禁止外部访问</td>
+          </tr>
+          <tr>
+            <td><code>--cap-drop</code></td>
+            <td><code>ALL</code></td>
+            <td>丢弃所有 Linux capabilities</td>
+          </tr>
+          <tr>
+            <td><code>--security-opt</code></td>
+            <td><code>no-new-privileges</code></td>
+            <td>禁止进程获取新权限（防 suid 提权）</td>
+          </tr>
+          <tr>
+            <td><code>--tmpfs</code></td>
+            <td><code>/tmp, /var/tmp, /run</code></td>
+            <td>临时文件系统，重启后清空</td>
+          </tr>
+          <tr>
+            <td><code>--pids-limit</code></td>
+            <td>可配置</td>
+            <td>限制容器进程数，防止 fork bomb</td>
+          </tr>
+          <tr>
+            <td><code>--memory</code></td>
+            <td>可配置</td>
+            <td>内存上限，防止 OOM 宿主机</td>
+          </tr>
+          <tr>
+            <td><code>--cpus</code></td>
+            <td>可配置</td>
+            <td>CPU 配额限制</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/sandbox/docker.ts — buildSandboxCreateArgs (核心)</span>
+      </div>
+      <pre><code class="language-typescript">// 1. 运行时安全验证
+validateSandboxSecurity({ ...params.cfg, allowedSourceRoots, ... });
+
+// 2. 构建 docker create 参数
+const args = ["create", "--name", params.name];
+args.push("--label", "openclaw.sandbox=1");
+args.push("--label", `openclaw.sessionKey=${params.scopeKey}`);
+args.push("--label", `openclaw.configHash=${params.configHash}`);
+if (params.cfg.readOnlyRoot) args.push("--read-only");
+for (const entry of params.cfg.tmpfs) args.push("--tmpfs", entry);
+args.push("--network", params.cfg.network);        // 默认 "none"
+for (const cap of params.cfg.capDrop) args.push("--cap-drop", cap);  // 默认 ["ALL"]
+args.push("--security-opt", "no-new-privileges");
+
+// 3. 环境变量消毒
+const envSanitization = sanitizeEnvVars(params.cfg.env ?? {});
+// 自动屏蔽 API key、token 等敏感环境变量</code></pre>
+    </div>
+
+    <div class="analogy">
+      <div class="analogy-label">生活类比</div>
+      <p>
+        Docker 沙箱就像一间<strong>安全实验室</strong>：Agent 在密封房间里工作，
+        有白板（workspace 挂载）和临时桌子（tmpfs），但没有网络（network=none）、
+        没有电话、门锁从外面控制（no-new-privileges），且墙壁是防弹玻璃（read-only root）。
+        Agent 可以在白板上自由操作，但无法影响实验室外的世界。
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 6: SANDBOX SCOPE ==================== -->
+  <section id="sandbox-scope">
+    <h2>3 级 Sandbox Scope</h2>
+
+    <p>
+      并非每次 Agent 调用都创建新容器。<code>SandboxScope</code> 控制容器的共享粒度，
+      在隔离性和资源效率之间取得平衡。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Scope</th>
+            <th>容器共享范围</th>
+            <th>容器命名</th>
+            <th>适用场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>session</code></td>
+            <td>每个会话独享容器</td>
+            <td><code>openclaw-sbx-{sessionKey}</code></td>
+            <td>最高隔离：不同用户的容器完全独立</td>
+          </tr>
+          <tr>
+            <td><code>agent</code></td>
+            <td>同一 Agent 的所有会话共享</td>
+            <td><code>openclaw-sbx-{agentId}</code></td>
+            <td>平衡模式（默认）</td>
+          </tr>
+          <tr>
+            <td><code>shared</code></td>
+            <td>所有 Agent 共享一个容器</td>
+            <td><code>openclaw-sbx-shared</code></td>
+            <td>最低资源消耗</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Sandbox Tool Policy</h3>
+
+    <p>
+      Sandbox 有独立的工具策略层 <code>resolveSandboxToolPolicyForAgent()</code>，控制容器内可以使用哪些工具。
+      默认配置中，<strong>允许</strong>文件/运行时/会话工具，<strong>拒绝</strong>浏览器/通道/自动化工具：
+    </p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/sandbox/constants.ts — 默认 Sandbox 工具策略</span>
+      </div>
+      <pre><code class="language-typescript">export const DEFAULT_TOOL_ALLOW = [
+  "exec", "process", "read", "write", "edit", "apply_patch",
+  "image", "sessions_list", "sessions_history", "sessions_send",
+  "sessions_spawn", "subagents", "session_status",
+] as const;
+
+export const DEFAULT_TOOL_DENY = [
+  "browser", "canvas", "nodes", "cron", "gateway",
+  ...CHANNEL_IDS,  // telegram, discord, slack, signal, imessage, web ...
+] as const;</code></pre>
+    </div>
+
+    <h3>容器生命周期：Config Hash 与热窗口</h3>
+
+    <p>
+      容器不是用完即弃的。<code>ensureSandboxContainer()</code> 通过 <code>computeSandboxConfigHash()</code>
+      比对当前配置与容器标签中的哈希值，决定复用还是重建。
+      如果容器在最近 <strong>5 分钟</strong>内被使用（<code>HOT_CONTAINER_WINDOW_MS</code>），
+      即使配置变更也不会自动销毁，而是提示用户手动 <code>openclaw sandbox recreate</code>。
+    </p>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>清理策略</th>
+            <th>默认值</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>idleHours</td>
+            <td>24 小时</td>
+            <td>未使用超过此时间自动清理</td>
+          </tr>
+          <tr>
+            <td>maxAgeDays</td>
+            <td>7 天</td>
+            <td>超过此年龄一律清理</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 7: SANDBOX SECURITY ==================== -->
+  <section id="sandbox-security">
+    <h2>容器安全与 Bind Mount 验证</h2>
+
+    <p>
+      <code>validateSandboxSecurity()</code> 在每次创建容器时执行运行时安全检查，
+      即使配置来自受信任的本地文件，也要防止足枪（foot-gun）和配置注入。
+    </p>
+
+    <h3>Bind Mount 黑名单</h3>
+
+    <p>以下宿主机路径<strong>永远不允许</strong>挂载到容器中：</p>
+
+    <div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-block-lang">TypeScript</span>
+        <span class="code-block-file">src/agents/sandbox/validate-sandbox-security.ts — BLOCKED_HOST_PATHS</span>
+      </div>
+      <pre><code class="language-typescript">export const BLOCKED_HOST_PATHS = [
+  "/etc", "/private/etc",      // 系统配置
+  "/proc", "/sys", "/dev",     // 内核接口
+  "/root", "/boot",            // 特权目录
+  "/run", "/var/run",          // Docker socket 所在目录
+  "/private/var/run",
+  "/var/run/docker.sock",      // Docker socket 本身
+  "/private/var/run/docker.sock",
+  "/run/docker.sock",
+];</code></pre>
+    </div>
+
+    <h3>Seccomp / AppArmor 限制</h3>
+
+    <p>
+      <code>unconfined</code> 的 seccomp 或 AppArmor profile 被明确禁止。
+      此外，预留的容器内路径 <code>/workspace</code> 和 <code>/agent</code>
+      不允许被自定义 bind mount 覆盖。
+    </p>
+
+    <h3>3 个 Dangerous 旗标</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>配置项</th>
+            <th>效果</th>
+            <th>风险</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>dangerouslyAllowReservedContainerTargets</code></td>
+            <td>允许 bind mount 到 /workspace 和 /agent</td>
+            <td>可能覆盖 Agent 的工作目录</td>
+          </tr>
+          <tr>
+            <td><code>dangerouslyAllowExternalBindSources</code></td>
+            <td>允许挂载 allowedSourceRoots 之外的路径</td>
+            <td>扩大宿主机暴露面</td>
+          </tr>
+          <tr>
+            <td><code>dangerouslyAllowContainerNamespaceJoin</code></td>
+            <td>允许 container:xxx 网络模式</td>
+            <td>容器间网络隔离失效</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        环境变量消毒
+      </div>
+      <p><code>sanitizeEnvVars()</code> 会自动屏蔽名称中包含 <code>KEY</code>、<code>TOKEN</code>、<code>SECRET</code>、<code>PASSWORD</code> 等模式的环境变量，防止 API 密钥泄露到容器内。被屏蔽的变量会记录在 <code>envSanitization.blocked</code> 中用于审计。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 8: SOURCE INDEX ==================== -->
+  <section id="source-index">
+    <h2>源码索引</h2>
+
+    <h3>Tool 注册与 Policy</h3>
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>src/agents/tool-catalog.ts</td>
+            <td>工具分组、Profile 定义、Section 注册</td>
+            <td><code>CORE_TOOL_DEFINITIONS</code>, <code>CORE_TOOL_GROUPS</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/tool-policy-pipeline.ts</td>
+            <td>7 层 Pipeline 实现</td>
+            <td><code>applyToolPolicyPipeline</code>, <code>buildDefaultToolPolicyPipelineSteps</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/tool-policy.ts</td>
+            <td>Policy 匹配、Owner-only、Plugin Group 展开</td>
+            <td><code>applyOwnerOnlyToolPolicy</code>, <code>stripPluginOnlyAllowlist</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/tool-policy-shared.ts</td>
+            <td>工具名归一化、Group 展开、别名</td>
+            <td><code>normalizeToolName</code>, <code>expandToolGroups</code></td>
+          </tr>
+          <tr>
+            <td>src/plugins/tools.ts</td>
+            <td>Plugin 工具加载与名称冲突检测</td>
+            <td><code>resolvePluginTools</code>, <code>getPluginToolMeta</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Docker Sandbox</h3>
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键导出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>src/agents/sandbox.ts</td>
+            <td>Sandbox 模块入口（re-exports）</td>
+            <td><code>resolveSandboxContext</code>, <code>buildSandboxCreateArgs</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/config.ts</td>
+            <td>Sandbox 配置解析（scope, docker, browser, prune）</td>
+            <td><code>resolveSandboxConfigForAgent</code>, <code>resolveSandboxScope</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/docker.ts</td>
+            <td>Docker 容器管理（create, start, hash, prune）</td>
+            <td><code>ensureSandboxContainer</code>, <code>buildSandboxCreateArgs</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/context.ts</td>
+            <td>Sandbox 上下文组装（workspace + container + browser）</td>
+            <td><code>resolveSandboxContext</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/tool-policy.ts</td>
+            <td>Sandbox 级工具策略（glob 匹配）</td>
+            <td><code>resolveSandboxToolPolicyForAgent</code>, <code>isToolAllowed</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/validate-sandbox-security.ts</td>
+            <td>运行时安全检查（bind mount, network, seccomp）</td>
+            <td><code>validateSandboxSecurity</code>, <code>BLOCKED_HOST_PATHS</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/constants.ts</td>
+            <td>默认值与常量</td>
+            <td><code>DEFAULT_SANDBOX_IMAGE</code>, <code>DEFAULT_TOOL_ALLOW</code>, <code>DEFAULT_TOOL_DENY</code></td>
+          </tr>
+          <tr>
+            <td>src/agents/sandbox/types.ts</td>
+            <td>Sandbox 类型定义</td>
+            <td><code>SandboxContext</code>, <code>SandboxConfig</code>, <code>SandboxScope</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Hooks</h3>
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>src/hooks/types.ts</td>
+            <td>Hook 类型定义：<code>Hook</code>, <code>HookEntry</code>, <code>OpenClawHookMetadata</code></td>
+          </tr>
+          <tr>
+            <td>src/hooks/loader.ts</td>
+            <td>Hook 发现与加载</td>
+          </tr>
+          <tr>
+            <td>src/hooks/hooks.ts</td>
+            <td>Hook 运行器（before/after tool call 调度）</td>
+          </tr>
+          <tr>
+            <td>src/hooks/bundled/</td>
+            <td>内置 Hook 实现（boot-md, session-memory, command-logger 等）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; <a href="../index.html">返回总览</a></p>
+  </footer>
+</main>
+
+<script>
+  hljs.highlightAll();
+  const progressBar = document.getElementById('scrollProgress');
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const tocLinks = document.querySelectorAll('.doc-toc a');
+  const sections = Array.from(tocLinks).map(link => {
+    const id = link.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function updateToc() {
+    const scrollPos = window.scrollY + 120;
+    let currentId = '';
+    for (const section of sections) {
+      if (section.offsetTop <= scrollPos) currentId = section.id;
+    }
+    tocLinks.forEach(link => {
+      const id = link.getAttribute('href').slice(1);
+      link.classList.toggle('active', id === currentId);
+    });
+  }
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>
