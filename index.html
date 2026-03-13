@@ -584,6 +584,29 @@
 <!-- ==================== TOPIC CARDS ==================== -->
 <div class="topics-area">
 
+  <!-- ======== Layer 1: Channels ======== -->
+  <div class="layer-group animate-in">
+    <div class="layer-group-header">
+      <div class="layer-group-dot dot-channel"></div>
+      <div class="layer-group-label">Layer 1 &mdash; 渠道接入层</div>
+      <div class="layer-group-sublabel">统一适配 · 插件扩展</div>
+    </div>
+    <div class="topic-grid topic-grid-2col">
+
+      <div class="topic-card topic-card-disabled">
+        <span class="topic-card-number">01</span>
+        <span class="topic-card-tag tag-channel">Channels</span>
+        <h3>渠道适配架构：20+ 平台的统一接入</h3>
+        <p>认证、解析、控制、格式化 4 层抽象。9 个内置渠道 + Plugin SDK 扩展机制。</p>
+        <span class="topic-card-arrow">
+          即将推出
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+      </div>
+
+    </div>
+  </div>
+
   <!-- ======== Layer 2: Gateway ======== -->
   <div class="layer-group animate-in">
     <div class="layer-group-header">
@@ -594,7 +617,7 @@
     <div class="topic-grid topic-grid-2col">
 
       <a href="topics/gateway-control-plane.html" class="topic-card">
-        <span class="topic-card-number">01</span>
+        <span class="topic-card-number">02</span>
         <span class="topic-card-tag tag-gateway">Control Plane</span>
         <h3>Gateway 控制平面：单进程 WebSocket 的 19 域管理架构</h3>
         <p>一个 WebSocket 端口统管 19 个管理域、104+ 个 RPC 方法、18 种广播事件。从会话管理到多节点编排的完整控制面。</p>
@@ -605,7 +628,7 @@
       </a>
 
       <a href="topics/lane-queue.html" class="topic-card">
-        <span class="topic-card-number">02</span>
+        <span class="topic-card-number">03</span>
         <span class="topic-card-tag tag-gateway">Concurrency</span>
         <h3>Lane Queue：车道队列并发控制</h3>
         <p>纯 TypeScript + Promises 的 lane-aware FIFO 队列。双层排队、Pump 自驱动、约 325 行代码解决并发安全。</p>
@@ -616,7 +639,7 @@
       </a>
 
       <div class="topic-card topic-card-disabled">
-        <span class="topic-card-number">03</span>
+        <span class="topic-card-number">04</span>
         <span class="topic-card-tag tag-gateway">Dispatch</span>
         <h3>消息处理模式：5-mode 调度策略</h3>
         <p>steer / followup / collect / steer-backlog / interrupt — 消息到达后如何决定处理方式。</p>
@@ -639,7 +662,7 @@
     <div class="topic-grid topic-grid-2col">
 
       <a href="topics/agent-runtime.html" class="topic-card">
-        <span class="topic-card-number">04</span>
+        <span class="topic-card-number">05</span>
         <span class="topic-card-tag tag-agent">Runtime</span>
         <h3>Agent Runtime 选型：Build vs Buy 的五种答案</h3>
         <p>从 Pi Agent Core 到 Claude SDK，五个项目给出五种 Agent 执行引擎方案。对比核心循环、工具执行、流式输出。</p>
@@ -650,7 +673,7 @@
       </a>
 
       <div class="topic-card topic-card-disabled">
-        <span class="topic-card-number">05</span>
+        <span class="topic-card-number">06</span>
         <span class="topic-card-tag tag-agent">Prompt</span>
         <h3>System Prompt 组装与 Skill 注入</h3>
         <p>11 个 section 的多模式动态组装、三层 Skill 加载策略、Bootstrap 上下文注入、Token 预算控制。</p>
@@ -661,33 +684,10 @@
       </div>
 
       <div class="topic-card topic-card-disabled">
-        <span class="topic-card-number">06</span>
+        <span class="topic-card-number">07</span>
         <span class="topic-card-tag tag-agent">Streaming</span>
         <h3>Streaming 与 Compaction 架构</h3>
         <p>增量推送的事件模型、Block Reply 分块策略、上下文压缩触发机制与 Memory Flush 保护。</p>
-        <span class="topic-card-arrow">
-          即将推出
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </span>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ======== Layer 1: Channels ======== -->
-  <div class="layer-group animate-in">
-    <div class="layer-group-header">
-      <div class="layer-group-dot dot-channel"></div>
-      <div class="layer-group-label">Layer 1 &mdash; 渠道接入层</div>
-      <div class="layer-group-sublabel">统一适配 · 插件扩展</div>
-    </div>
-    <div class="topic-grid topic-grid-2col">
-
-      <div class="topic-card topic-card-disabled">
-        <span class="topic-card-number">07</span>
-        <span class="topic-card-tag tag-channel">Channels</span>
-        <h3>渠道适配架构：20+ 平台的统一接入</h3>
-        <p>认证、解析、控制、格式化 4 层抽象。9 个内置渠道 + Plugin SDK 扩展机制。</p>
         <span class="topic-card-arrow">
           即将推出
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
