@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>生态采纳现状 — OpenClaw C/B/G 端应用场景与安全挑战</title>
+  <meta name="description" content="OpenClaw 全球采纳现状调研：C端个人助手、B端企业自动化、G端空白，以及安全成熟度瓶颈分析">
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    /* === Page-specific styles === */
+
+    .analysis-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-5);
+      margin: var(--space-6) 0 var(--space-8);
+    }
+    @media (max-width: 640px) {
+      .analysis-grid { grid-template-columns: 1fr; }
+    }
+
+    .analysis-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: var(--space-5) var(--space-6);
+      box-shadow: var(--shadow-sm);
+      transition: all var(--duration-fast) var(--ease-out);
+    }
+    .analysis-card:hover {
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .analysis-card-header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    .analysis-card-icon {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: var(--size-sm);
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .analysis-card-title {
+      font-family: var(--font-body);
+      font-size: var(--size-sm);
+      font-weight: 700;
+    }
+    .analysis-card-body {
+      font-size: var(--size-xs);
+      line-height: 1.7;
+      color: var(--ink-secondary);
+    }
+    .analysis-card-body ul {
+      list-style: none;
+      padding: 0;
+    }
+    .analysis-card-body li {
+      padding: var(--space-1) 0;
+      padding-left: var(--space-4);
+      position: relative;
+    }
+    .analysis-card-body li::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0.6em;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+    }
+
+    /* Color variants */
+    .ac-green { border-left: 3px solid #16A34A; }
+    .ac-green .analysis-card-icon { background: rgba(22,163,74,0.07); color: #16A34A; }
+    .ac-green .analysis-card-title { color: #16A34A; }
+    .ac-green li::before { background: #16A34A; opacity: 0.4; }
+
+    .ac-red { border-left: 3px solid #DC2626; }
+    .ac-red .analysis-card-icon { background: rgba(220,38,38,0.07); color: #DC2626; }
+    .ac-red .analysis-card-title { color: #DC2626; }
+    .ac-red li::before { background: #DC2626; opacity: 0.4; }
+
+    .ac-amber { border-left: 3px solid #D97706; }
+    .ac-amber .analysis-card-icon { background: rgba(217,119,6,0.07); color: #D97706; }
+    .ac-amber .analysis-card-title { color: #D97706; }
+    .ac-amber li::before { background: #D97706; opacity: 0.4; }
+
+    .ac-blue { border-left: 3px solid var(--accent-2); }
+    .ac-blue .analysis-card-icon { background: var(--accent-2-soft); color: var(--accent-2); }
+    .ac-blue .analysis-card-title { color: var(--accent-2); }
+    .ac-blue li::before { background: var(--accent-2); opacity: 0.4; }
+
+    .ac-purple { border-left: 3px solid var(--accent-4); }
+    .ac-purple .analysis-card-icon { background: var(--accent-4-soft); color: var(--accent-4); }
+    .ac-purple .analysis-card-title { color: var(--accent-4); }
+    .ac-purple li::before { background: var(--accent-4); opacity: 0.4; }
+
+    .ac-teal { border-left: 3px solid var(--accent-3); }
+    .ac-teal .analysis-card-icon { background: var(--accent-3-soft); color: var(--accent-3); }
+    .ac-teal .analysis-card-title { color: var(--accent-3); }
+    .ac-teal li::before { background: var(--accent-3); opacity: 0.4; }
+
+    .analysis-card-full { grid-column: 1 / -1; }
+
+    .analysis-grid-3col {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+    @media (max-width: 768px) {
+      .analysis-grid-3col { grid-template-columns: 1fr; }
+    }
+
+    /* Badge */
+    .risk-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      vertical-align: middle;
+      margin-left: var(--space-1);
+    }
+    .risk-high { background: rgba(220,38,38,0.08); color: #DC2626; }
+    .risk-med { background: rgba(217,119,6,0.08); color: #D97706; }
+    .risk-low { background: rgba(22,163,74,0.08); color: #16A34A; }
+
+    /* Stats bar */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-4);
+      margin: var(--space-8) 0;
+    }
+    @media (max-width: 640px) {
+      .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .stat-item {
+      text-align: center;
+      padding: var(--space-5) var(--space-3);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .stat-number {
+      font-family: var(--font-display);
+      font-size: var(--size-2xl);
+      font-weight: 600;
+      color: var(--accent);
+      line-height: 1;
+      margin-bottom: var(--space-2);
+    }
+
+    .stat-label {
+      font-size: var(--size-xs);
+      color: var(--ink-tertiary);
+      font-weight: 500;
+    }
+
+    /* Maturity gauge */
+    .maturity-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      padding: var(--space-4) 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .maturity-row:last-child { border-bottom: none; }
+
+    .maturity-label {
+      font-weight: 600;
+      font-size: var(--size-sm);
+      min-width: 80px;
+      flex-shrink: 0;
+    }
+
+    .maturity-bar-track {
+      flex: 1;
+      height: 8px;
+      background: var(--surface-dim);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .maturity-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.8s var(--ease-out);
+    }
+
+    .maturity-desc {
+      font-size: var(--size-xs);
+      color: var(--ink-tertiary);
+      min-width: 160px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    /* Use case card grid */
+    .usecase-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: var(--space-4);
+      margin: var(--space-6) 0 var(--space-8);
+    }
+    @media (max-width: 768px) {
+      .usecase-grid { grid-template-columns: 1fr; }
+    }
+
+    .usecase-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: var(--space-5);
+      box-shadow: var(--shadow-sm);
+      transition: all var(--duration-fast) var(--ease-out);
+    }
+    .usecase-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .usecase-card-tag {
+      display: inline-block;
+      font-size: 0.625rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-bottom: var(--space-3);
+    }
+
+    .tag-hot { background: rgba(220,38,38,0.08); color: #DC2626; }
+    .tag-growing { background: rgba(217,119,6,0.08); color: #D97706; }
+    .tag-niche { background: rgba(37,99,235,0.08); color: #2563EB; }
+
+    .usecase-card h4 {
+      font-family: var(--font-body);
+      font-size: var(--size-sm);
+      font-weight: 700;
+      color: var(--ink);
+      margin-top: 0;
+      margin-bottom: var(--space-2);
+    }
+
+    .usecase-card p {
+      font-size: var(--size-xs);
+      color: var(--ink-secondary);
+      line-height: 1.6;
+      margin-bottom: 0;
+    }
+
+    /* Source reference */
+    .source-ref {
+      font-size: var(--size-xs);
+      color: var(--ink-faint);
+      margin-top: var(--space-2);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Scroll progress bar -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Top navigation bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+    返回架构总览
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Architecture Deep Dive</span>
+</nav>
+
+<!-- Table of Contents -->
+<nav class="doc-toc" id="toc">
+  <div class="doc-toc-title">目录</div>
+  <a href="#scale">项目规模</a>
+  <a href="#c-end">C端场景</a>
+  <a href="#b-end">B端场景</a>
+  <a href="#g-end">G端现状</a>
+  <a href="#security-challenges">安全挑战</a>
+  <a href="#maturity">成熟度评估</a>
+  <a href="#takeaways">结论与启示</a>
+</nav>
+
+<!-- Main content -->
+<main class="doc-main">
+
+  <!-- ==================== HERO ==================== -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Ecosystem Research</div>
+    <h1>生态采纳现状<br>C/B/G 端应用场景与安全挑战</h1>
+    <p class="doc-hero-subtitle">
+      基于 GitHub 数据、社区 Showcase、媒体报道和安全通告的综合调研。从实际用户部署视角，客观分析 OpenClaw 在消费者、企业和政府市场的采纳成熟度。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        Ecosystem Analysis
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-15
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        商汤科技 亚太业务事业群 &middot; 王欣鑫
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== SECTION 1: 项目规模 ==================== -->
+  <section id="scale" class="animate-in delay-1">
+    <h2>项目规模与增长态势</h2>
+
+    <p>
+      OpenClaw 由奥地利开发者 Peter Steinberger 于 2025 年 11 月创建，2026 年 1 月底开源后迅速爆发。<strong>60 天内 GitHub Star 数超越 React</strong>，成为史上增速最快的开源项目之一。
+    </p>
+
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-number">250K+</div>
+        <div class="stat-label">GitHub Stars</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">48K+</div>
+        <div class="stat-label">Forks</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">1,075+</div>
+        <div class="stat-label">Contributors</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">~4 月</div>
+        <div class="stat-label">项目年龄</div>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        增长路径
+      </div>
+      <p>开源首日 9,000 Stars &rarr; 3 天 60,000 &rarr; 2 周 190,000 &rarr; 60 天 250,000。全有机增长，未上线 Product Hunt，无 VC 推广。中国开发者社区在项目走红数天内即贡献了中文翻译、部署指南和教程。</p>
+    </div>
+
+    <p>
+      社区活跃渠道包括 Discord 服务器（结构化管理）、X/Twitter @OpenClawCommunity、ClawCon 2026 技术大会。项目以每周多版本的频率持续迭代，当前版本 <code>2026.3.14</code>。
+    </p>
+  </section>
+
+
+  <!-- ==================== SECTION 2: C端场景 ==================== -->
+  <section id="c-end" class="animate-in">
+    <h2>C端：个人 AI 助手 — 最核心的定位</h2>
+
+    <p>
+      OpenClaw 的产品定位是 <strong>"Personal AI Assistant"</strong>，C 端个人用户是其核心用户群。以下场景均来自官方 Showcase 和社区真实案例。
+    </p>
+
+    <div class="usecase-grid">
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-hot">最热门</span>
+        <h4>每日早报 / Daily Briefing</h4>
+        <p>通过 Telegram/WhatsApp 推送个性化晨间摘要：天气、日历、任务、新闻、健康数据。替代 5-6 个 App 的信息聚合。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-hot">最热门</span>
+        <h4>邮件自动化管理</h4>
+        <p>社区案例：处理 15,000 封邮件，自动退订垃圾邮件、按紧急程度分类、起草回复。报告节省 78% 邮件处理时间。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-hot">最热门</span>
+        <h4>智能家居控制</h4>
+        <p>通过 Home Assistant 集成，自然语言控制 Philips Hue 灯光、Elgato 设备、恒温器等。社区项目 GoHome 提供 Nix + Grafana 完整方案。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-growing">增长中</span>
+        <h4>购物 &amp; 预订自动化</h4>
+        <p>浏览器自动化完成 Tesco 超市周订单、Padel 球场预订、ParentPay 学校餐食预订。无需 API，纯浏览器控制。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-growing">增长中</span>
+        <h4>开发者工具链</h4>
+        <p>PR Review 结果推送 Telegram、Jira/Linear 集成、Codex 任务监控、iOS App 通过 Telegram 聊天完成 TestFlight 部署。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-growing">增长中</span>
+        <h4>健康 &amp; 量化自我</h4>
+        <p>Oura 智能戒指数据集成，关联日历、健身计划、就医预约。个人 AI 健康助手。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-niche">垂直场景</span>
+        <h4>金融与交易分析</h4>
+        <p>浏览器自动化登录 TradingView、截图K线图、执行技术分析。自然语言查询消费记录。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-niche">垂直场景</span>
+        <h4>硬件 IoT 控制</h4>
+        <p>BambuLab 3D 打印机管理、Winix 空气净化器控制、Roborock 扫地机器人对话操控。</p>
+      </div>
+
+      <div class="usecase-card">
+        <span class="usecase-card-tag tag-niche">垂直场景</span>
+        <h4>语言学习 &amp; 知识管理</h4>
+        <p>中文学习引擎（发音反馈）、WhatsApp 语音笔记转录索引、书签语义搜索。</p>
+      </div>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        C端核心价值
+      </div>
+      <p>OpenClaw 的 C 端壁垒在于 <strong>22+ 消息渠道的统一接入</strong>。用户不需要离开自己习惯的 IM（WhatsApp / Telegram / iMessage），就能获得完整的 AI 助手能力。这是 ChatGPT 等云端 AI 做不到的。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 3: B端场景 ==================== -->
+  <section id="b-end" class="animate-in">
+    <h2>B端：企业自动化 — 早期但增长快</h2>
+
+    <p>
+      B 端采纳集中在<strong>小团队 / 一人公司 / 自由职业者</strong>，尚未进入大型企业的正式 IT 采购流程。以下是已验证的商业场景。
+    </p>
+
+    <div class="analysis-grid">
+      <div class="analysis-card ac-blue">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">&#9741;</div>
+          <div class="analysis-card-title">客服与支持</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>Slack 自动客服：</strong>监控公司 Slack 频道，自动回复 support 问题，转发通知至 Telegram。有案例报告 Agent 自主修复生产环境 bug。</li>
+            <li><strong>多语言支持：</strong>Broadcast Groups 允许同一消息触发多个 Agent，可实现英语/德语/西语并行响应。</li>
+            <li><strong>工单分级：</strong>连接 Slack/Discord/WebChat，从知识库匹配答案，按紧急程度分级上报。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="analysis-card ac-teal">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">&#9881;</div>
+          <div class="analysis-card-title">销售与获客</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>AI SDR（Sales Development）：</strong>24/7 监控表单提交 &rarr; Lead 信息富化 &rarr; 个性化跟进邮件 &rarr; 写入 CRM。</li>
+            <li><strong>园艺公司案例：</strong>5 分钟内响应 leads，成交率提升 30%。</li>
+            <li><strong>一人公司收入：</strong>有用户报告使用 OpenClaw 3 周内创收 $14,700；另有人运营 $4,000/周 的自动化业务。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="analysis-card ac-purple">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">&#9874;</div>
+          <div class="analysis-card-title">流程自动化</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>客户 Onboarding：</strong>一条消息触发：创建文件夹 &rarr; 发邮件 &rarr; CRM 更新 &rarr; 日历邀请 &rarr; 权限配置，15 分钟完成。</li>
+            <li><strong>会计自动化：</strong>从邮件收集 PDF 发票，准备报税材料，月度记账自动化。</li>
+            <li><strong>eBay 运营：</strong>发货日期跟踪、消息管理、预订管理。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="analysis-card ac-green">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">&#10070;</div>
+          <div class="analysis-card-title">多 Agent 协作</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>Dream Team 架构：</strong>14+ Agent 在一个 Gateway 下，Opus 4.5 编排器分派任务给 Codex 执行者。包含完整的技术架构文档。</li>
+            <li><strong>代码审查团队：</strong>CodeReviewer + SecurityAuditor + TestGenerator + DocsChecker 并行处理同一 PR。</li>
+            <li><strong>零售数据分析：</strong>处理 29 家门店、40TB 数据的定价情报和商品匹配。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h3>B端部署架构</h3>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>规模</th>
+            <th>推荐方案</th>
+            <th>典型配置</th>
+            <th>现状</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>个人 / 1-5人</td>
+            <td>本地安装 + Tailscale</td>
+            <td>单机 Node.js，SQLite</td>
+            <td>成熟，社区主流</td>
+          </tr>
+          <tr>
+            <td>小团队 10-50人</td>
+            <td>Docker Compose</td>
+            <td>3-10 实例，多 Agent</td>
+            <td>可用，需自行运维</td>
+          </tr>
+          <tr>
+            <td>中大规模 100+人</td>
+            <td>Kubernetes</td>
+            <td>AKS/EKS/GKE + Kustomize</td>
+            <td>实验性，文档初步</td>
+          </tr>
+          <tr>
+            <td>阿里云用户</td>
+            <td>HiClaw 团队版</td>
+            <td>一键部署，Fork 版本</td>
+            <td>第三方维护</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        B端采纳瓶颈
+      </div>
+      <p>B 端用户普遍是<strong>技术型创业者和自由职业者</strong>，而非 IT 部门通过正式流程引入。缺乏多租户、RBAC、审计日志、SLA 等企业级功能，是进入正式 B 端采购的最大障碍。参见 <a href="tob-analysis.html">toB 技术分析</a>。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 4: G端现状 ==================== -->
+  <section id="g-end" class="animate-in">
+    <h2>G端：政府市场 — 当前为零</h2>
+
+    <p>
+      <strong>截至 2026 年 3 月，未发现任何政府部门部署 OpenClaw 的公开案例。</strong>这是多重因素共同导致的。
+    </p>
+
+    <div class="analysis-grid analysis-grid-3col">
+      <div class="analysis-card ac-red">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">1</div>
+          <div class="analysis-card-title">安全漏洞密集</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>CVE-2026-25253</strong>（CVSS 8.8）WebSocket Token 窃取，可远程执行命令</li>
+            <li><strong>42,000+</strong> 暴露实例无认证运行</li>
+            <li><strong>820+</strong> ClawHub 恶意 Skill，335 个属于 "ClawHavoc" 攻击活动</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="analysis-card ac-amber">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">2</div>
+          <div class="analysis-card-title">多机构安全警告</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>中国 CERT：</strong>"极弱的默认安全配置"</li>
+            <li><strong>Microsoft：</strong>发布安全运行指南</li>
+            <li><strong>Cisco：</strong>"a security nightmare"</li>
+            <li><strong>Kaspersky：</strong>默认配置 "unsafe for use"</li>
+            <li><strong>Trend Micro：</strong>发布 CISO 安全分析报告</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="analysis-card ac-blue">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">3</div>
+          <div class="analysis-card-title">结构性障碍</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li>项目仅 ~4 个月历史，远未达到政府采购周期要求</li>
+            <li>无等保测评、无安全评估报告、无算法备案</li>
+            <li>无商业实体、无 SLA、无法签署政府合同</li>
+            <li>Prompt Injection 攻击面为架构性问题，非配置可解</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 5: 安全挑战 ==================== -->
+  <section id="security-challenges" class="animate-in">
+    <h2>安全成熟度：增长速度远超安全加固</h2>
+
+    <p>
+      OpenClaw 的安全问题并非设计意愿缺失&mdash;&mdash;其代码中包含 7 层工具权限管道、Docker 沙箱、执行审批等机制。问题在于<strong>爆发式增长暴露了默认配置的脆弱性</strong>，大量非技术用户在未加固的情况下暴露在公网。
+    </p>
+
+    <div class="analysis-grid">
+      <div class="analysis-card ac-red analysis-card-full">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">!</div>
+          <div class="analysis-card-title">已知安全事件时间线</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li><strong>2026-02 CVE-2026-25253：</strong>WebSocket Token 窃取漏洞（CVSS 8.8），攻击者可接管 Gateway 并远程执行任意命令。 <span class="risk-badge risk-high">CRITICAL</span></li>
+            <li><strong>2026-02 42K+ 暴露实例：</strong>安全研究人员发现超过 42,000 个 OpenClaw 实例无认证暴露在公网，可被任意访问。 <span class="risk-badge risk-high">HIGH</span></li>
+            <li><strong>2026-03 ClawHavoc 攻击：</strong>ClawHub 技能市场发现 820+ 恶意 Skill，其中 335 个属于名为 "ClawHavoc" 的协调攻击活动。类比 npm 供应链攻击。 <span class="risk-badge risk-high">HIGH</span></li>
+            <li><strong>2026-03 中国 CERT 通告：</strong>中国国家计算机网络应急技术处理协调中心（CERT）发布安全警告，指出 OpenClaw 默认安全配置极弱。 <span class="risk-badge risk-med">MED</span></li>
+            <li><strong>Prompt Injection：</strong>Agent 从邮件、网页等外部内容中摄取文本并调用工具执行，天然存在提示注入攻击面。此为 AI Agent 架构的固有问题。 <span class="risk-badge risk-med">ONGOING</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        对 SensePedia 的启示
+      </div>
+      <p>OpenClaw 的安全教训值得所有 AI Agent 平台参考：<strong>1)</strong> 默认配置必须安全（secure by default），不能依赖用户手动加固；<strong>2)</strong> 技能市场需要审核机制和代码签名；<strong>3)</strong> Agent 从外部内容摄取信息时必须有隔离沙箱，防止 Prompt Injection 跨越信任边界。</p>
+    </div>
+  </section>
+
+
+  <!-- ==================== SECTION 6: 成熟度评估 ==================== -->
+  <section id="maturity" class="animate-in">
+    <h2>C / B / G 采纳成熟度对比</h2>
+
+    <div class="diagram">
+      <div class="diagram-title">成熟度评估矩阵</div>
+
+      <div class="maturity-row">
+        <div class="maturity-label" style="color: #16A34A;">C 端</div>
+        <div class="maturity-bar-track">
+          <div class="maturity-bar-fill" style="width: 85%; background: linear-gradient(90deg, #16A34A, #22D3EE);"></div>
+        </div>
+        <div class="maturity-desc">成熟 &mdash; 日报、家居、自动化</div>
+      </div>
+
+      <div class="maturity-row">
+        <div class="maturity-label" style="color: #D97706;">B 端</div>
+        <div class="maturity-bar-track">
+          <div class="maturity-bar-fill" style="width: 35%; background: linear-gradient(90deg, #D97706, #FBBF24);"></div>
+        </div>
+        <div class="maturity-desc">早期 &mdash; 小团队/一人公司为主</div>
+      </div>
+
+      <div class="maturity-row">
+        <div class="maturity-label" style="color: #DC2626;">G 端</div>
+        <div class="maturity-bar-track">
+          <div class="maturity-bar-fill" style="width: 2%; background: #DC2626;"></div>
+        </div>
+        <div class="maturity-desc">空白 &mdash; 安全/合规/采购全不达标</div>
+      </div>
+    </div>
+
+    <div class="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>C端（消费者）</th>
+            <th>B端（企业）</th>
+            <th>G端（政府）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>采纳阶段</td>
+            <td>主流采用</td>
+            <td>早期探索</td>
+            <td>未开始</td>
+          </tr>
+          <tr>
+            <td>典型用户</td>
+            <td>技术型个人用户、开发者</td>
+            <td>一人公司、自由职业者、小团队</td>
+            <td>无</td>
+          </tr>
+          <tr>
+            <td>核心场景</td>
+            <td>日报、邮件、智能家居、自动化</td>
+            <td>客服、SDR、流程自动化、多Agent</td>
+            <td>N/A</td>
+          </tr>
+          <tr>
+            <td>部署方式</td>
+            <td>本机安装 + Tailscale</td>
+            <td>Docker / K8s</td>
+            <td>N/A</td>
+          </tr>
+          <tr>
+            <td>阻碍因素</td>
+            <td>需技术能力，安全需自行加固</td>
+            <td>缺多租户、RBAC、审计、SLA</td>
+            <td>安全、合规、采购全不满足</td>
+          </tr>
+          <tr>
+            <td>商业验证</td>
+            <td>大量社区 Showcase</td>
+            <td>零散营收案例（$4K-$14.7K/周）</td>
+            <td>无</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <!-- ==================== CONCLUSION ==================== -->
+  <section id="takeaways" class="animate-in">
+    <h2>结论与启示</h2>
+
+    <div class="analysis-grid">
+      <div class="analysis-card ac-green">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">1</div>
+          <div class="analysis-card-title">市场信号明确</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li>250K Stars 验证了 <strong>"把 AI 接入已有消息渠道"</strong> 这一产品方向的真实需求</li>
+            <li>C 端个人 AI 助手已被充分验证，但 B 端和 G 端存在巨大的产品化空白</li>
+            <li>企业客户需要的不是 "更好的 OpenClaw"，而是在这个方向上做出完全不同安全等级的产品</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="analysis-card ac-blue">
+        <div class="analysis-card-header">
+          <div class="analysis-card-icon">2</div>
+          <div class="analysis-card-title">SensePedia 的机会窗口</div>
+        </div>
+        <div class="analysis-card-body">
+          <ul>
+            <li>OpenClaw 在 B 端和 G 端的空白，恰恰是 SensePedia Agent Platform 的目标市场</li>
+            <li>可借鉴 OpenClaw 验证过的产品模式（多渠道接入、Skill 生态、多 Agent 协作），在安全合规和企业级能力上做差异化</li>
+            <li>OpenClaw 的安全事件为竞品提供了反面教材&mdash;&mdash;"Secure by Default" 应是产品核心卖点</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-key">
+      <div class="callout-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        一句话总结
+      </div>
+      <p>OpenClaw 证明了需求，暴露了风险，留下了空间。<strong>C 端已被占领，B/G 端大门敞开</strong>&mdash;&mdash;前提是你能交付企业级安全、合规和运维能力。</p>
+    </div>
+  </section>
+
+</main>
+
+<script>
+  // Scroll progress bar
+  window.addEventListener('scroll', () => {
+    const bar = document.getElementById('scrollProgress');
+    if (!bar) return;
+    const h = document.documentElement;
+    const pct = (h.scrollTop / (h.scrollHeight - h.clientHeight)) * 100;
+    bar.style.width = pct + '%';
+  });
+
+  // Animate-in on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('animate-in');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('section:not(.animate-in)').forEach(el => observer.observe(el));
+
+  // TOC active tracking
+  const tocLinks = document.querySelectorAll('#toc a');
+  const sections = Array.from(tocLinks).map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  const tocObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      const link = document.querySelector(`#toc a[href="#${entry.target.id}"]`);
+      if (link) link.classList.toggle('active', entry.isIntersecting);
+    });
+  }, { threshold: 0.2, rootMargin: '-80px 0px -60% 0px' });
+  sections.forEach(s => tocObserver.observe(s));
+</script>
+
+</body>
+</html>
