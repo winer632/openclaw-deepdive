@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenClaw 总览 — AI 网关 vs 其他 AI 工具</title>
+  <meta name="description" content="OpenClaw 是什么？它与 ChatGPT、Claude、Cursor、Manus 等 AI 工具有何本质区别？一个多通道 AI 网关的定位解析。">
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    /* === Page-specific: comparison cards === */
+    .tool-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-5);
+      margin: var(--space-6) 0 var(--space-8);
+    }
+    @media (max-width: 640px) {
+      .tool-grid { grid-template-columns: 1fr; }
+    }
+
+    .tool-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: var(--space-5) var(--space-6);
+      box-shadow: var(--shadow-sm);
+      transition: all var(--duration-fast) var(--ease-out);
+    }
+    .tool-card:hover {
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .tool-card-header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    .tool-card-icon {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: var(--size-sm);
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .tool-card-title {
+      font-family: var(--font-body);
+      font-size: var(--size-sm);
+      font-weight: 700;
+    }
+    .tool-card-body {
+      font-size: var(--size-xs);
+      line-height: 1.7;
+      color: var(--ink-secondary);
+    }
+    .tool-card-body ul {
+      list-style: none;
+      padding: 0;
+    }
+    .tool-card-body li {
+      padding: var(--space-1) 0;
+      padding-left: var(--space-4);
+      position: relative;
+    }
+    .tool-card-body li::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0.6em;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+    }
+
+    .tc-gray { border-left: 3px solid var(--ink-tertiary); }
+    .tc-gray .tool-card-icon { background: var(--surface-dim); color: var(--ink-tertiary); }
+    .tc-gray .tool-card-title { color: var(--ink-tertiary); }
+    .tc-gray li::before { background: var(--ink-tertiary); opacity: 0.4; }
+
+    .tc-blue { border-left: 3px solid var(--accent-2); }
+    .tc-blue .tool-card-icon { background: var(--accent-2-soft); color: var(--accent-2); }
+    .tc-blue .tool-card-title { color: var(--accent-2); }
+    .tc-blue li::before { background: var(--accent-2); opacity: 0.4; }
+
+    .tc-purple { border-left: 3px solid var(--accent-4); }
+    .tc-purple .tool-card-icon { background: var(--accent-4-soft); color: var(--accent-4); }
+    .tc-purple .tool-card-title { color: var(--accent-4); }
+    .tc-purple li::before { background: var(--accent-4); opacity: 0.4; }
+
+    .tc-accent { border-left: 3px solid var(--accent); }
+    .tc-accent .tool-card-icon { background: var(--accent-soft); color: var(--accent); }
+    .tc-accent .tool-card-title { color: var(--accent); }
+    .tc-accent li::before { background: var(--accent); opacity: 0.4; }
+
+    .tool-card-full { grid-column: 1 / -1; }
+
+    /* Diff cards */
+    .diff-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-5);
+      margin: var(--space-6) 0 var(--space-8);
+    }
+    @media (max-width: 640px) {
+      .diff-grid { grid-template-columns: 1fr; }
+    }
+
+    .diff-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: var(--space-6);
+      box-shadow: var(--shadow-sm);
+      transition: all var(--duration-fast) var(--ease-out);
+    }
+    .diff-card:hover {
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .diff-num {
+      font-family: var(--font-display);
+      font-size: var(--size-3xl);
+      font-weight: 300;
+      color: var(--border);
+      line-height: 1;
+      margin-bottom: var(--space-3);
+    }
+    .diff-title {
+      font-family: var(--font-display);
+      font-size: var(--size-lg);
+      font-weight: 500;
+      color: var(--ink);
+      margin-bottom: var(--space-3);
+    }
+    .diff-desc {
+      font-size: var(--size-sm);
+      line-height: 1.7;
+      color: var(--ink-secondary);
+    }
+    .diff-desc strong { color: var(--ink); }
+
+    /* Architecture diagram */
+    .arch-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      margin: var(--space-8) 0;
+    }
+    .arch-box {
+      width: 100%;
+      max-width: 580px;
+      border-radius: 12px;
+      padding: var(--space-5) var(--space-6);
+      text-align: center;
+    }
+    .arch-box-label {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: var(--space-2);
+    }
+    .arch-box-items {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      opacity: 0.7;
+      line-height: 1.6;
+    }
+    .arch-box-channels {
+      background: rgba(37, 99, 235, 0.06);
+      border: 1px solid rgba(37, 99, 235, 0.15);
+      color: var(--accent-2);
+    }
+    .arch-box-gateway {
+      background: rgba(209, 77, 53, 0.06);
+      border: 1px solid rgba(209, 77, 53, 0.15);
+      color: var(--accent);
+    }
+    .arch-box-models {
+      background: rgba(13, 148, 136, 0.06);
+      border: 1px solid rgba(13, 148, 136, 0.15);
+      color: var(--accent-3);
+    }
+    .arch-connector {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: var(--space-2) 0;
+      color: var(--ink-faint);
+    }
+    .arch-connector-line {
+      width: 2px;
+      height: 14px;
+      background: var(--border-strong);
+      border-radius: 1px;
+    }
+    .arch-connector-label {
+      font-family: var(--font-body);
+      font-size: var(--size-xs);
+      color: var(--ink-tertiary);
+      margin-top: 2px;
+    }
+    .arch-connector svg {
+      width: 12px;
+      height: 12px;
+      opacity: 0.35;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<nav class="doc-topbar">
+  <a href="../index.html" class="doc-topbar-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    Index
+  </a>
+  <span class="doc-topbar-brand"><strong>OpenClaw</strong> &middot; Overview</span>
+</nav>
+
+<main class="doc-main">
+
+  <!-- Hero -->
+  <header class="doc-hero animate-in">
+    <div class="doc-hero-kicker">Overview</div>
+    <h1>OpenClaw 总览：<br>AI 网关 vs 其他 AI 工具</h1>
+    <p class="doc-hero-subtitle">
+      OpenClaw 不是另一个聊天机器人，而是一个开源的多通道 AI 网关（Gateway）。它把一个 AI Agent 同时接入 20+ 消息平台，运行在你自己的设备上。
+    </p>
+    <div class="doc-hero-meta">
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        2026-03-15
+      </span>
+      <span class="doc-hero-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+        商汤科技 亚太业务事业群 &middot; 王欣鑫
+      </span>
+    </div>
+  </header>
+
+
+  <!-- ==================== Section 1: 四类 AI 工具 ==================== -->
+  <h2 id="categories">四类 AI 工具的本质区别</h2>
+
+  <p>目前主流的 AI 工具可以分为三类——对话端点、编码助手、任务代理。OpenClaw 属于第四类：<strong>AI 网关</strong>。</p>
+
+  <div class="tool-grid">
+
+    <div class="tool-card tc-gray">
+      <div class="tool-card-header">
+        <div class="tool-card-icon">1</div>
+        <div class="tool-card-title">对话端点</div>
+      </div>
+      <div class="tool-card-body">
+        <ul>
+          <li><strong>代表：</strong>ChatGPT、Claude、文心一言、通义千问</li>
+          <li><strong>核心能力：</strong>对话式问答</li>
+          <li><strong>交互方式：</strong>打开网页 / App 才能用</li>
+          <li><strong>特点：</strong>模型能力强，但只是一个"端点"——用户必须主动找它</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tool-card tc-blue">
+      <div class="tool-card-header">
+        <div class="tool-card-icon">2</div>
+        <div class="tool-card-title">编码助手</div>
+      </div>
+      <div class="tool-card-body">
+        <ul>
+          <li><strong>代表：</strong>Cursor、Copilot、Claude Code</li>
+          <li><strong>核心能力：</strong>代码生成与编辑</li>
+          <li><strong>交互方式：</strong>在 IDE 中使用</li>
+          <li><strong>特点：</strong>深度嵌入开发流程，但局限于代码场景</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tool-card tc-purple">
+      <div class="tool-card-header">
+        <div class="tool-card-icon">3</div>
+        <div class="tool-card-title">任务代理</div>
+      </div>
+      <div class="tool-card-body">
+        <ul>
+          <li><strong>代表：</strong>Manus、豆包手机</li>
+          <li><strong>核心能力：</strong>执行复杂任务</li>
+          <li><strong>交互方式：</strong>专用界面</li>
+          <li><strong>特点：</strong>能操作系统、编排工作流，但需要切换到专用 App</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tool-card tc-accent">
+      <div class="tool-card-header">
+        <div class="tool-card-icon">4</div>
+        <div class="tool-card-title">AI 网关 &mdash; OpenClaw</div>
+      </div>
+      <div class="tool-card-body">
+        <ul>
+          <li><strong>核心能力：</strong>多通道接入 + Agent 编排 + 工具执行</li>
+          <li><strong>交互方式：</strong>在你已有的 IM 中使用</li>
+          <li><strong>覆盖渠道：</strong>WhatsApp、Telegram、Slack、飞书、Discord、Signal、iMessage、Teams、Web、Zalo ...</li>
+          <li><strong>特点：</strong>不提供模型能力，而是把任何大模型的能力通过统一控制平面接入 22 个消息渠道</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="callout callout-key">
+    <div class="callout-label">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+      Key Insight
+    </div>
+    <p><strong>ChatGPT 是你去找 AI，OpenClaw 是让 AI 来找你</strong>——在你已有的聊天工具里，7&times;24 小时在线。</p>
+  </div>
+
+
+  <!-- ==================== Section 2: 架构定位 ==================== -->
+  <h2 id="positioning">架构定位：中间层，而不是端点</h2>
+
+  <p>ChatGPT 本身就是产品的终点。OpenClaw 是一个<strong>中间层</strong>——上接 20+ 消息渠道，下接多种大模型，中间做 Session 管理、Agent 路由、工具编排、安全控制。它解决的是<strong>连接和调度</strong>的问题，不是模型能力的问题。</p>
+
+  <div class="diagram">
+    <div class="diagram-title">OpenClaw 架构定位</div>
+    <div class="arch-stack">
+
+      <div class="arch-box arch-box-channels">
+        <div class="arch-box-label">用户已有的消息平台</div>
+        <div class="arch-box-items">WhatsApp &middot; Telegram &middot; Slack &middot; 飞书 &middot; Discord &middot; Signal &middot; iMessage &middot; Teams &middot; Web &middot; Zalo &middot; Matrix &middot; LINE ...</div>
+      </div>
+
+      <div class="arch-connector">
+        <div class="arch-connector-line"></div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+        <div class="arch-connector-label">统一接入</div>
+      </div>
+
+      <div class="arch-box arch-box-gateway">
+        <div class="arch-box-label">OpenClaw &mdash; AI Gateway</div>
+        <div class="arch-box-items">Session 管理 &middot; 消息路由 &middot; Agent 编排 &middot; 工具执行 &middot; 安全控制 &middot; 持久记忆</div>
+      </div>
+
+      <div class="arch-connector">
+        <div class="arch-connector-line"></div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+        <div class="arch-connector-label">按需调用</div>
+      </div>
+
+      <div class="arch-box arch-box-models">
+        <div class="arch-box-label">大模型 / 工具 / 知识库</div>
+        <div class="arch-box-items">Claude &middot; GPT &middot; Gemini &middot; Kimi &middot; DeepSeek &middot; 通义千问 &middot; 本地模型 &middot; Browser &middot; Docker &middot; MCP</div>
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- ==================== Section 3: 4 个不一样 ==================== -->
+  <h2 id="differences">4 个"不一样"</h2>
+
+  <p>理解 OpenClaw 与其他 AI 工具的本质差异，关键在于这四点：</p>
+
+  <div class="diff-grid">
+
+    <div class="diff-card">
+      <div class="diff-num">01</div>
+      <div class="diff-title">交互方式不一样</div>
+      <div class="diff-desc">
+        <strong>用户不用离开现有 IM。</strong>ChatGPT 要打开网页，Cursor 要打开 IDE，Manus 要打开专用界面。OpenClaw 让你在 WhatsApp 发消息、在 Telegram 发指令、在飞书群里 @它——不需要切换到任何新的应用。22 个渠道，一个 Agent。
+      </div>
+    </div>
+
+    <div class="diff-card">
+      <div class="diff-num">02</div>
+      <div class="diff-title">运行位置不一样</div>
+      <div class="diff-desc">
+        <strong>自托管、数据不出境。</strong>ChatGPT / Claude 的对话数据存在云端。OpenClaw 运行在你自己的 Mac / Linux / VPS / Docker 上，所有数据本地存储。可对接国产大模型（Kimi、通义千问、DeepSeek），实现数据完全不出境。
+      </div>
+    </div>
+
+    <div class="diff-card">
+      <div class="diff-num">03</div>
+      <div class="diff-title">工作模式不一样</div>
+      <div class="diff-desc">
+        <strong>7&times;24 小时 Always-On。</strong>ChatGPT / Claude 是"你问它答"——关掉网页就断了。OpenClaw 是后台常驻服务：Heartbeat 每 30 分钟自动检查待办事项、Cron 定时任务、Webhook 外部触发。你不在电脑前，它也在工作。
+      </div>
+    </div>
+
+    <div class="diff-card">
+      <div class="diff-num">04</div>
+      <div class="diff-title">架构角色不一样</div>
+      <div class="diff-desc">
+        <strong>网关，而不是端点。</strong>ChatGPT 本身就是产品终点。OpenClaw 是一个中间层——上接 20+ 消息渠道，下接多种大模型（Claude、GPT、Gemini、Kimi、DeepSeek），中间做 Session 管理、Agent 路由、工具编排、安全控制。它解决的是连接和调度的问题。
+      </div>
+    </div>
+
+  </div>
+
+
+  <!-- ==================== Section 4: 对比表 ==================== -->
+  <h2 id="comparison">详细对比</h2>
+
+  <div class="doc-table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>维度</th>
+          <th>ChatGPT / Claude</th>
+          <th>Cursor / Copilot</th>
+          <th>Manus</th>
+          <th>OpenClaw</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>部署方式</td>
+          <td>云端 SaaS</td>
+          <td>云端 IDE</td>
+          <td>云端</td>
+          <td><strong>自托管</strong>（Mac / Linux / Docker）</td>
+        </tr>
+        <tr>
+          <td>消息渠道</td>
+          <td>仅 Web / App</td>
+          <td>仅 IDE</td>
+          <td>专用界面</td>
+          <td><strong>22+ 渠道</strong>（WhatsApp、Telegram、Slack、飞书 ...）</td>
+        </tr>
+        <tr>
+          <td>数据存储</td>
+          <td>云端</td>
+          <td>云端</td>
+          <td>云端</td>
+          <td><strong>本地存储</strong>，数据不出境</td>
+        </tr>
+        <tr>
+          <td>模型支持</td>
+          <td>自家模型</td>
+          <td>少数集成</td>
+          <td>少数集成</td>
+          <td><strong>24+ 模型提供商</strong>（可切换、可 fallback）</td>
+        </tr>
+        <tr>
+          <td>工作模式</td>
+          <td>用户主动问</td>
+          <td>编码时触发</td>
+          <td>用户主动问</td>
+          <td><strong>Always-On</strong>（Heartbeat + Cron + Webhook）</td>
+        </tr>
+        <tr>
+          <td>多 Agent</td>
+          <td>单对话</td>
+          <td>单上下文</td>
+          <td>单 Agent</td>
+          <td><strong>多 Agent 路由</strong>（6 维隔离、按渠道/任务分派）</td>
+        </tr>
+        <tr>
+          <td>持久记忆</td>
+          <td>按对话</td>
+          <td>按会话</td>
+          <td>按对话</td>
+          <td><strong>跨会话持久</strong>（MEMORY.md + 向量搜索）</td>
+        </tr>
+        <tr>
+          <td>开源</td>
+          <td>否</td>
+          <td>否</td>
+          <td>否</td>
+          <td><strong>MIT 开源</strong>（可审计、可 fork）</td>
+        </tr>
+        <tr>
+          <td>费用模式</td>
+          <td>月费订阅</td>
+          <td>月费订阅</td>
+          <td>月费订阅</td>
+          <td><strong>按 API 调用付费</strong>（无平台费）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+
+  <!-- ==================== Section 5: 一句话总结 ==================== -->
+  <h2 id="summary">一句话定位</h2>
+
+  <div class="callout callout-insight">
+    <div class="callout-label">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+      Summary
+    </div>
+    <p><strong>OpenClaw = 多通道 AI 网关。</strong>它不提供模型能力，而是把任何大模型的能力，通过一个统一的控制平面，接入你已经在用的 22 个消息平台。自托管、数据本地、Always-On、模型可切换、MIT 开源。</p>
+    <p>ChatGPT / Claude 是 AI 的<strong>端点</strong>，OpenClaw 是 AI 的<strong>网关</strong>。前者是"你去找 AI"，后者是"让 AI 来找你"。</p>
+  </div>
+
+
+  <!-- Footer -->
+  <footer class="doc-footer">
+    <p>OpenClaw Architecture Deep Dive &middot; 2026</p>
+  </footer>
+
+</main>
+
+<script>
+  // Scroll progress
+  const bar = document.createElement('div');
+  bar.className = 'scroll-progress';
+  document.body.prepend(bar);
+  window.addEventListener('scroll', () => {
+    const h = document.documentElement;
+    bar.style.width = (h.scrollTop / (h.scrollHeight - h.clientHeight) * 100) + '%';
+  });
+</script>
+
+</body>
+</html>
