@@ -581,6 +581,18 @@
   </div>
 </section>
 
+<!-- ==================== DATA FLOW DIAGRAM ==================== -->
+<section class="arch-section animate-in delay-1" style="padding-top: var(--space-8);">
+  <div class="arch-diagram" style="padding: var(--space-6);">
+    <div class="arch-diagram-title">End-to-End Data Flow — 消息全链路数据流</div>
+    <p style="text-align:center; font-size:var(--size-xs); color:var(--ink-secondary); margin-bottom:var(--space-4); line-height:var(--leading-normal);">
+      一条消息从渠道到达、经 Gateway 路由、进入 Agent 推理循环、调用 LLM 完成推理、最终流式输出回渠道的完整路径。
+    </p>
+    <img src="assets/data-flow.png" alt="OpenClaw 系统架构与数据流"
+         style="width:100%; border-radius:12px;" />
+  </div>
+</section>
+
 <!-- ==================== TOPIC CARDS ==================== -->
 <div class="topics-area">
 
